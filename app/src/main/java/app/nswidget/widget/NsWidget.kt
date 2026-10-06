@@ -37,6 +37,7 @@ import androidx.glance.layout.Box
 import androidx.glance.layout.Column
 import androidx.glance.layout.Row
 import androidx.glance.layout.Spacer
+import androidx.glance.layout.fillMaxHeight
 import androidx.glance.layout.fillMaxSize
 import androidx.glance.layout.fillMaxWidth
 import androidx.glance.layout.height
@@ -60,8 +61,6 @@ import java.time.ZonedDateTime
 // The platform sign keeps NS yellow whatever the wallpaper; everything else follows dynamic colour.
 private val ChipInk = ColorProvider(Color(0xFF14233F))
 private val ChipWhite = ColorProvider(Color.White)
-
-private val ROW_HEIGHT = 26.dp
 
 /** Outer padding, header, banner, the gaps between them and the list card's own padding. */
 private const val FIXED_HEIGHT_DP = 120f
@@ -104,11 +103,9 @@ private fun WidgetContent(model: WidgetModel) {
     val openApp = actionStartActivity(Intent(context, MainActivity::class.java))
     val openMap = model.mapUri?.let { actionStartActivity(mapsIntent(context, it)) }
     val compact = size.width < 200.dp
-    val maxRows = ((size.height.value - FIXED_HEIGHT_DP) / ROW_HEIGHT.value)
-        .toInt()
-        .coerceIn(1, WidgetModels.MAX_ROWS)
-
-    val rows = if (model.message == null) model.rows.take(maxRows) else emptyList()
+    val fontScale = context.resources.configuration.fontScale
+    val layout = WidgetModels.rowLayout(model.rows, size.height.value - FIXED_HEIGHT_DP, fontScale)
+    val rows = if (model.message == null) model.rows.take(layout.maxRows) else emptyList()
     // Only make room for a delay ("+3") when a visible train is actually late, and only as wide
     // as its digits need - so on-time boards have no gap at all.
     val delayDigits = rows
@@ -148,7 +145,9 @@ private fun WidgetContent(model: WidgetModel) {
                     modifier = GlanceModifier.padding(vertical = 8.dp),
                 )
             } else {
-                rows.forEach { DepartureLine(it, compact, delaySlot, size.width.value - LIST_SIDE_PADDING_DP) }
+                rows.forEach {
+                    DepartureLine(it, compact, delaySlot, size.width.value - LIST_SIDE_PADDING_DP, layout.dual)
+                }
             }
         }
     }
@@ -282,20 +281,42 @@ private fun DiscountBanner(model: WidgetModel, compact: Boolean) {
 }
 
 @Composable
-private fun DepartureLine(row: DepartureRow, compact: Boolean, delaySlot: Dp, contentWidthDp: Float) {
+private fun DepartureLine(
+    row: DepartureRow,
+    compact: Boolean,
+    delaySlot: Dp,
+    contentWidthDp: Float,
+    dual: Boolean,
+) {
     val primary = if (row.cancelled) GlanceTheme.colors.onSurfaceVariant else GlanceTheme.colors.onSurface
 
-    // The "via" cities go in the spare space to the right of the destination, and only as many as
-    // actually fit (with a clear gap) - so showing them never costs a departure row or squeezes
-    // the platform sign.
+    // Width taken by everything except the destination: time, delay, train type, platform sign.
     val fontScale = LocalContext.current.resources.configuration.fontScale
     val taken = 60f + delaySlot.value + (if (compact) 0f else 34f) + 34f + 8f
-    val viaBudget = contentWidthDp - taken -
-        WidgetModels.estimateDirectionWidth(row.direction, fontScale) - WidgetModels.VIA_GAP_DP
-    val via = if (compact) null else WidgetModels.viaText(row.via, viaBudget, fontScale)
+    // Two-line rows give the cities their own line under the destination, so they only need to
+    // fit the destination's column. Otherwise they share the destination's line and only appear
+    // when there's clear room - either way they never squeeze the platform sign.
+    val via = if (dual) {
+        WidgetModels.viaText(
+            row.via, contentWidthDp - taken, fontScale,
+            charDp = WidgetModels.viaCharDp(WidgetModels.VIA_DUAL_SP),
+        )
+    } else if (compact) {
+        null
+    } else {
+        val budget = contentWidthDp - taken -
+            WidgetModels.estimateDirectionWidth(row.direction, fontScale) - WidgetModels.VIA_GAP_DP
+        WidgetModels.viaText(
+            row.via, budget, fontScale,
+            charDp = WidgetModels.viaCharDp(WidgetModels.VIA_INLINE_SP),
+            maxCities = WidgetModels.MAX_VIA_INLINE,
+        )
+    }
 
     Row(
-        modifier = GlanceModifier.fillMaxWidth().height(ROW_HEIGHT),
+        modifier = GlanceModifier
+            .fillMaxWidth()
+            .height((if (dual) WidgetModels.dualRowDp(fontScale) else WidgetModels.SINGLE_ROW_DP).dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -324,18 +345,42 @@ private fun DepartureLine(row: DepartureRow, compact: Boolean, delaySlot: Dp, co
                 maxLines = 1,
             )
         }
-        if (via != null) {
+        if (dual) {
+            Column(modifier = GlanceModifier.defaultWeight()) {
+                Text(
+                    text = row.direction,
+                    style = text(primary, 13, strike = row.cancelled),
+                    maxLines = 1,
+                )
+                if (via != null) {
+                    Text(
+                        text = via,
+                        style = text(GlanceTheme.colors.outline, WidgetModels.VIA_DUAL_SP),
+                        maxLines = 1,
+                    )
+                }
+            }
+        } else if (via != null) {
             Text(
                 text = row.direction,
                 style = text(primary, 14, strike = row.cancelled),
                 maxLines = 1,
             )
             Spacer(GlanceModifier.defaultWeight())
-            Text(
-                text = via,
-                style = text(GlanceTheme.colors.onSurfaceVariant, 10),
-                maxLines = 1,
-            )
+            // No "via" prefix: the dimmer colour and the gap already set the cities apart. They sit
+            // at the bottom right of the row, like a caption, with a little room below so the text's
+            // baseline lines up with the destination's.
+            Column(
+                modifier = GlanceModifier.fillMaxHeight(),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                Text(
+                    text = via,
+                    style = text(GlanceTheme.colors.outline, WidgetModels.VIA_INLINE_SP),
+                    maxLines = 1,
+                    modifier = GlanceModifier.padding(bottom = 3.dp),
+                )
+            }
             Spacer(GlanceModifier.width(8.dp))
         } else {
             Text(

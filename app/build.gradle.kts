@@ -1,3 +1,7 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,8 +16,9 @@ android {
         applicationId = "app.nswidget"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        // Includes the build time so it's obvious which APK is installed (shown in the app).
+        versionName = "1.1 (" + SimpleDateFormat("MMM d, HH:mm", Locale.ENGLISH).format(Date()) + ")"
     }
 
     buildTypes {

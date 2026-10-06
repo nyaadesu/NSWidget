@@ -96,28 +96,72 @@ object WidgetModels {
     private fun formatTime(epochMs: Long): String =
         Instant.ofEpochMilli(epochMs).atZone(PeakRules.ZONE).format(HHMM)
 
-    /** The "via" line never shows more than this many cities; more than two reads as clutter. */
-    const val MAX_VIA = 2
+    /** The "via" line never shows more than this many cities. */
+    const val MAX_VIA = 3
 
-    /** Empty space kept between a destination and its "via" text. */
-    const val VIA_GAP_DP = 16f
+    /** Cities shown when "via" has to share a line with the destination (fewer if they don't fit). */
+    const val MAX_VIA_INLINE = 3
+
+    /** Empty space kept between a destination and its "via" text when they share a line. */
+    const val VIA_GAP_DP = 12f
+
+    /** Text size of the cities list: beside the destination, and on its own line under it. */
+    const val VIA_INLINE_SP = 9
+    const val VIA_DUAL_SP = 8
+
+    /** Estimated width of one character of the cities text at the default font size. */
+    fun viaCharDp(sp: Int): Float = sp * 0.46f
+
+    /** Height of a departure row with one line of text (tuned on a phone running a 1.3x font). */
+    const val SINGLE_ROW_DP = 26f
+
+    /** Height of a row with a destination plus a "via" line at the default font size. */
+    const val DUAL_ROW_DP = 28f
+
+    /** Two lines of text grow with the user's font size, so the row has to as well. */
+    fun dualRowDp(fontScale: Float): Float = DUAL_ROW_DP * maxOf(1f, fontScale)
+
+    /** [dual]: each row is a destination with its "via" cities underneath. */
+    data class RowLayout(val dual: Boolean, val maxRows: Int)
 
     /**
-     * Rough width of a destination in the widget's 14sp text. Measured against real captures, with
-     * caps-heavy names like "Den Haag Centraal" as the worst case, and scaled by the user's font size.
+     * Chooses between roomy two-line rows (destination + cities underneath) and compact one-line rows.
+     * Two lines are only used when they show at least as many departures as one line would, so
+     * adding the cities never costs a departure; short widgets keep the compact layout.
+     */
+    fun rowLayout(rows: List<DepartureRow>, availableDp: Float, fontScale: Float = 1f): RowLayout {
+        val single = (availableDp / SINGLE_ROW_DP).toInt().coerceIn(1, MAX_ROWS)
+        val dual = (availableDp / dualRowDp(fontScale)).toInt().coerceIn(1, MAX_ROWS)
+        val useDual = rows.take(dual).any { it.via.isNotEmpty() } &&
+            minOf(dual, rows.size) >= minOf(single, rows.size)
+        return RowLayout(dual = useDual, maxRows = if (useDual) dual else single)
+    }
+
+    /**
+     * Rough width of a destination in the widget's 14sp text at the default font size, scaled by the
+     * user's font scale. Measured on a real phone (caps-heavy "Den Haag Centraal" was 155 dp at a
+     * 1.3x font scale, i.e. 7 dp per character at 1.0x).
      */
     fun estimateDirectionWidth(direction: String, fontScale: Float = 1f): Float =
-        direction.length * 9.1f * fontScale
+        direction.length * 7.0f * fontScale
 
     /**
-     * "via Rotterdam, Delft" using as many of [cities] (at most [MAX_VIA]) as fit in [budgetDp]
-     * at 10sp, or null if not even the first fits. Estimates err on the wide side so the text is
-     * never clipped or squeezed against its neighbours.
+     * "Rotterdam, Delft" using as many of [cities] (at most [maxCities]) as fit in [budgetDp],
+     * or null if not even the first fits. [charDp] is the estimated width of one character at the
+     * default font size (4.6 for 10sp text, 4.2 for 9sp; measured at 4.2 and 3.8, plus a safety
+     * margin) and is scaled by [fontScale], so text is never clipped or squeezed against its
+     * neighbours.
      */
-    fun viaText(cities: List<String>, budgetDp: Float, fontScale: Float = 1f): String? {
-        for (count in minOf(cities.size, MAX_VIA) downTo 1) {
-            val text = "via " + cities.take(count).joinToString(", ")
-            if (text.length * 5.8f * fontScale <= budgetDp) return text
+    fun viaText(
+        cities: List<String>,
+        budgetDp: Float,
+        fontScale: Float = 1f,
+        charDp: Float = 4.6f,
+        maxCities: Int = MAX_VIA,
+    ): String? {
+        for (count in minOf(cities.size, maxCities) downTo 1) {
+            val text = cities.take(count).joinToString(", ")
+            if (text.length * charDp * fontScale <= budgetDp) return text
         }
         return null
     }

@@ -186,20 +186,108 @@ class WidgetModelTest {
     @Test
     fun viaTextUsesAsManyCitiesAsFit() {
         val cities = listOf("Rotterdam", "Delft", "Den Haag")
-        // Never more than two cities, however much room there is.
-        assertEquals("via Rotterdam, Delft", WidgetModels.viaText(cities, 500f))
-        // "via Rotterdam, Delft" is 20 chars -> ~116 dp; "via Rotterdam" is 13 chars -> ~75 dp.
-        assertEquals("via Rotterdam, Delft", WidgetModels.viaText(cities, 120f))
-        assertEquals("via Rotterdam", WidgetModels.viaText(cities, 80f))
+        // Up to three cities when there is room for them.
+        assertEquals("Rotterdam, Delft, Den Haag", WidgetModels.viaText(cities, 500f))
+        // At 4.6 dp a character: all three = 26 chars -> ~120 dp, "Rotterdam, Delft" = 16 -> ~74 dp,
+        // "Rotterdam" = 9 -> ~41 dp.
+        assertEquals("Rotterdam, Delft", WidgetModels.viaText(cities, 100f))
+        assertEquals("Rotterdam", WidgetModels.viaText(cities, 60f))
         assertNull("not even one city fits", WidgetModels.viaText(cities, 40f))
         assertNull(WidgetModels.viaText(emptyList(), 500f))
     }
 
     @Test
+    fun viaTextCanBeCappedAndAllowsForSmallerText() {
+        val cities = listOf("Rotterdam", "Delft", "Den Haag")
+        assertEquals("Rotterdam, Delft", WidgetModels.viaText(cities, 500f, maxCities = 2))
+        // 26 characters: ~120 dp at 10sp, but only ~109 dp at 9sp - so 9sp fits all three in 115 dp.
+        assertEquals("Rotterdam, Delft, Den Haag", WidgetModels.viaText(cities, 115f, charDp = 4.2f))
+        assertEquals("Rotterdam, Delft", WidgetModels.viaText(cities, 115f))
+    }
+
+    private fun viaRow(vararg cities: String) = DepartureRow(
+        time = "10:00", delayMinutes = 0, category = "IC", direction = "Amsterdam Centraal",
+        track = "5", trackChanged = false, cancelled = false, via = cities.toList(),
+    )
+
+    @Test
+    fun twoLineRowsAreUsedWhenTheyCostNoDepartures() {
+        val rows = List(8) { viaRow("Rotterdam") }
+        // 124 dp: four 26 dp rows fit, and so do four 28 dp rows.
+        val layout = WidgetModels.rowLayout(rows, 124f)
+        assertTrue(layout.dual)
+        assertEquals(4, layout.maxRows)
+    }
+
+    @Test
+    fun fallsBackToOneLineWhenTwoLinesWouldShowFewerDepartures() {
+        val rows = List(8) { viaRow("Rotterdam") }
+        // 110 dp: four 26 dp rows fit (104) but only three 28 dp rows (84; four need 112).
+        val layout = WidgetModels.rowLayout(rows, 110f)
+        assertFalse(layout.dual)
+        assertEquals(4, layout.maxRows)
+    }
+
+    @Test
+    fun largeFontsNeedTallerTwoLineRowsSoTheCompactLayoutWins() {
+        val rows = List(8) { viaRow("Rotterdam") }
+        // 124 dp fits four 28 dp two-line rows at the default font, but at a 1.3x font each needs
+        // ~36 dp, so only three would fit - fewer than the four one-line rows - and one line wins.
+        assertTrue(WidgetModels.rowLayout(rows, 124f, fontScale = 1f).dual)
+        val large = WidgetModels.rowLayout(rows, 124f, fontScale = 1.3f)
+        assertFalse(large.dual)
+        assertEquals(4, large.maxRows)
+        // Given enough height, two lines are fine even with a large font.
+        assertTrue(WidgetModels.rowLayout(rows, 300f, fontScale = 1.3f).dual)
+    }
+
+    @Test
+    fun twoLineRowGrowsWithTheFontButNeverShrinks() {
+        assertEquals(28f, WidgetModels.dualRowDp(1f), 0.001f)
+        assertEquals(28f, WidgetModels.dualRowDp(0.85f), 0.001f)
+        assertEquals(36.4f, WidgetModels.dualRowDp(1.3f), 0.001f)
+    }
+
+    @Test
+    fun oneLineRowsWhenNoVisibleTrainHasCities() {
+        val layout = WidgetModels.rowLayout(List(8) { viaRow() }, 200f)
+        assertFalse(layout.dual)
+        assertEquals(7, layout.maxRows)
+    }
+
+    @Test
+    fun twoLineRowsWhenThereAreFewerDeparturesThanSlots() {
+        val layout = WidgetModels.rowLayout(listOf(viaRow("Delft"), viaRow()), 200f)
+        assertTrue(layout.dual)
+    }
+
+    @Test
+    fun rowCountIsAlwaysBetweenOneAndTheMaximum() {
+        assertEquals(1, WidgetModels.rowLayout(List(8) { viaRow("Delft") }, 5f).maxRows)
+        assertEquals(WidgetModels.MAX_ROWS, WidgetModels.rowLayout(List(20) { viaRow("Delft") }, 1000f).maxRows)
+    }
+
+    @Test
+    fun smallerTextIsEstimatedNarrower() {
+        assertEquals(4.6f, WidgetModels.viaCharDp(10), 0.001f)
+        assertEquals(4.14f, WidgetModels.viaCharDp(WidgetModels.VIA_INLINE_SP), 0.001f)
+        assertEquals(3.68f, WidgetModels.viaCharDp(WidgetModels.VIA_DUAL_SP), 0.001f)
+        // The 9sp text fits a budget that the old 10sp text did not: 26 chars = ~108 dp vs ~120 dp.
+        val cities = listOf("Rotterdam", "Delft", "Den Haag")
+        val budget = 112f
+        assertEquals("Rotterdam, Delft", WidgetModels.viaText(cities, budget, charDp = WidgetModels.viaCharDp(10)))
+        assertEquals(
+            "Rotterdam, Delft, Den Haag",
+            WidgetModels.viaText(cities, budget, charDp = WidgetModels.viaCharDp(WidgetModels.VIA_INLINE_SP)),
+        )
+    }
+
+    @Test
     fun viaTextAllowsForLargeFonts() {
         val cities = listOf("Rotterdam", "Delft")
-        // 116 dp of text becomes ~151 dp with a 1.3x font, which no longer fits in 120 dp...
-        assertEquals("via Rotterdam", WidgetModels.viaText(cities, 120f, fontScale = 1.3f))
+        // 74 dp of text becomes ~96 dp with a 1.3x font, which no longer fits in 85 dp...
+        assertEquals("Rotterdam, Delft", WidgetModels.viaText(cities, 85f))
+        assertEquals("Rotterdam", WidgetModels.viaText(cities, 85f, fontScale = 1.3f))
         // ...and neither does the destination: its estimate grows with the font too.
         assertEquals(
             WidgetModels.estimateDirectionWidth("Den Haag Centraal") * 1.3f,
