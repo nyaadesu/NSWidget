@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NS Widget</string>
+    <string name="widget_label">NS departures &amp; discount</string>
+    <string name="widget_description">Off-peak discount countdown and live departures from your nearest station.</string>
+</resources>
