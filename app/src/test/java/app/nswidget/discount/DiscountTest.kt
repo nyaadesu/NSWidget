@@ -71,7 +71,8 @@ class DiscountTest {
         assertTrue(s.discountActive)
         assertEquals(at("2026-10-06T16:00:00"), s.changesAt)
         assertEquals("Off-peak · discount active", label("2026-10-06T09:00:00").title)
-        assertEquals("Peak starts 16:00", label("2026-10-06T09:00:00").subtitle)
+        assertEquals("Peak starts 16:00 · ends 18:30", label("2026-10-06T09:00:00").subtitle)
+        assertEquals("peak 16:00–18:30", DiscountText.label(discountStatus(at("2026-10-06T09:00:00")), at("2026-10-06T09:00:00")).compactSubtitle)
     }
 
     @Test
@@ -80,7 +81,7 @@ class DiscountTest {
         assertEquals(DiscountPhase.OFF_PEAK_ENDING, s.phase)
         assertTrue(s.discountActive)
         assertEquals("Discount ends in 30 min", label("2026-10-06T15:30:00").title)
-        assertEquals("Check in before 16:00", label("2026-10-06T15:30:00").subtitle)
+        assertEquals("Check in before 16:00 · peak ends 18:30", label("2026-10-06T15:30:00").subtitle)
     }
 
     @Test
@@ -97,7 +98,7 @@ class DiscountTest {
         val s = discountStatus(at("2026-10-10T07:30:00")) // Saturday
         assertEquals(DiscountPhase.OFF_PEAK, s.phase)
         assertEquals(at("2026-10-12T06:30:00"), s.changesAt)
-        assertEquals("Peak starts Mon 06:30", label("2026-10-10T07:30:00").subtitle)
+        assertEquals("Peak starts Mon 06:30 · ends 09:00", label("2026-10-10T07:30:00").subtitle)
     }
 
     @Test
@@ -113,7 +114,7 @@ class DiscountTest {
         val s = discountStatus(at("2026-04-27T07:00:00"))
         assertEquals(DiscountPhase.OFF_PEAK, s.phase)
         assertEquals(at("2026-04-28T06:30:00"), s.changesAt)
-        assertEquals("Peak starts tomorrow 06:30", label("2026-04-27T07:00:00").subtitle)
+        assertEquals("Peak starts tomorrow 06:30 · ends 09:00", label("2026-04-27T07:00:00").subtitle)
     }
 
     @Test

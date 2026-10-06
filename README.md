@@ -8,7 +8,7 @@ An Android home-screen widget for the Dutch railways (NS) that shows
 2. **Upcoming departures from your nearest station**, with departure time, delay, train type,
    destination and platform (yellow NS-style chip; orange if the platform changed, red if cancelled).
    The yellow map pin left of the station name opens Google Maps on the station.
-   Next to each destination a small "via Rotterdam, Delft" lists the major cities the train calls at
+   Next to each destination, in small dimmed text, the major cities the train calls at are listed ("Rotterdam, Delft")
    (only as many as fit, so it never costs a departure row; switch it off in the app). Which places count
    as major is a list in [`MajorCities.kt`](app/src/main/java/app/nswidget/data/MajorCities.kt).
 3. **Material You styling** (Material 3 Expressive, as used by recent Android versions): the widget and app

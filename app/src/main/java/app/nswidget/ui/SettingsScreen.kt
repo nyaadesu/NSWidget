@@ -268,7 +268,7 @@ fun SettingsScreen() {
                     Column(Modifier.weight(1f)) {
                         Text("Show cities along the route", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "A small “via Rotterdam, Delft” next to the destination, when there is room.",
+                            "Small, dimmed text such as “Rotterdam, Delft” next to the destination, when there is room.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -327,6 +327,23 @@ fun SettingsScreen() {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 4.dp),
             )
+
+            val version = remember {
+                try {
+                    @Suppress("DEPRECATION")
+                    ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            if (version != null) {
+                Text(
+                    "Version $version",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+            }
         }
     }
 }

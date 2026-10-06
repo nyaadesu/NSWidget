@@ -30,6 +30,10 @@ object DiscountText {
     fun label(status: DiscountStatus, now: ZonedDateTime): DiscountLabel {
         val at = whenLabel(status.changesAt, now)
         val m = status.minutesUntilChange
+        // When the discount is on, the next change is the start of a peak; when that peak is over
+        // is the change after it. (A peak window never spans midnight, so a clock time is enough.)
+        val peakEnd = PeakRules.nextChange(status.changesAt)
+            .withZoneSameInstant(PeakRules.ZONE).format(HHMM)
         return when (status.phase) {
             DiscountPhase.PEAK_ENDING -> DiscountLabel(
                 title = "Wait $m min for discount",
@@ -40,7 +44,7 @@ object DiscountText {
             DiscountPhase.OFF_PEAK_ENDING -> DiscountLabel(
                 title = "Discount ends in $m min",
                 compactTitle = "Ends in $m min",
-                subtitle = "Check in before $at",
+                subtitle = "Check in before $at · peak ends $peakEnd",
                 compactSubtitle = "before $at",
             )
             DiscountPhase.PEAK -> DiscountLabel(
@@ -52,8 +56,8 @@ object DiscountText {
             DiscountPhase.OFF_PEAK -> DiscountLabel(
                 title = "Off-peak · discount active",
                 compactTitle = "Discount on",
-                subtitle = "Peak starts $at",
-                compactSubtitle = "peak $at",
+                subtitle = "Peak starts $at · ends $peakEnd",
+                compactSubtitle = "peak $at–$peakEnd",
             )
         }
     }
