@@ -32,6 +32,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,6 +47,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import app.nswidget.StatusPalette
+import app.nswidget.data.ApiUsage
+import app.nswidget.data.Favourite
+import app.nswidget.data.Favourites
 import app.nswidget.data.SavedLocation
 import app.nswidget.data.Settings
 import app.nswidget.data.Station
@@ -57,6 +61,7 @@ import app.nswidget.discount.DiscountText
 import app.nswidget.discount.PeakRules
 import app.nswidget.discount.discountStatus
 import app.nswidget.location.LocationHelper
+import app.nswidget.refresh.FetchPolicy
 import app.nswidget.refresh.Refresher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -76,13 +81,16 @@ fun SettingsScreen() {
     var useNearest by remember { mutableStateOf(settings.useNearest) }
     var showVia by remember { mutableStateOf(settings.showVia) }
     var fixedName by remember { mutableStateOf(settings.fixedStationName) }
-    var query by remember { mutableStateOf("") }
+    var favourites by remember { mutableStateOf(settings.favourites) }
+    var newLabel by remember { mutableStateOf("") }
     var stations by remember { mutableStateOf(emptyList<Station>()) }
     var stationError by remember { mutableStateOf<String?>(null) }
     var location by remember { mutableStateOf(settings.location) }
     var hasForeground by remember { mutableStateOf(LocationHelper.hasForeground(ctx)) }
     var hasBackground by remember { mutableStateOf(LocationHelper.hasBackground(ctx)) }
     var now by remember { mutableStateOf(ZonedDateTime.now(PeakRules.ZONE)) }
+    val apiUsage = remember { ApiUsage(ctx) }
+    var apiCallsToday by remember { mutableStateOf(apiUsage.callsToday()) }
 
     // Keeps the live discount card and the permission state current (permissions can be changed
     // from system settings while this screen is open).
@@ -91,6 +99,7 @@ fun SettingsScreen() {
             now = ZonedDateTime.now(PeakRules.ZONE)
             hasForeground = LocationHelper.hasForeground(ctx)
             hasBackground = LocationHelper.hasBackground(ctx)
+            apiCallsToday = apiUsage.callsToday()
             delay(3_000)
         }
     }
@@ -110,7 +119,8 @@ fun SettingsScreen() {
 
     fun updateLocation() {
         scope.launch {
-            location = LocationHelper.refreshSaved(ctx, allowFresh = true)
+            // The app is on screen, so a new fix works even without background location access.
+            location = LocationHelper.refreshSaved(ctx, preferFresh = true)
             Refresher.requestFetch(ctx)
         }
     }
@@ -213,53 +223,66 @@ fun SettingsScreen() {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    label = { Text("Search stations") },
-                    singleLine = true,
-                    enabled = stations.isNotEmpty(),
-                    shape = MaterialTheme.shapes.large,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                StationPicker(stations, "Search stations") { station ->
+                    settings.fixedStationUic = station.uic
+                    settings.fixedStationName = station.name
+                    settings.fixedStationLatLng = station.lat to station.lng
+                    fixedName = station.name
+                    Refresher.requestFetch(ctx)
+                }
                 when {
                     savedKey.isBlank() -> Hint("Save your API key first to load the station list.")
                     stationError != null -> Hint(stationError ?: "", error = true)
                     stations.isEmpty() -> Hint("Loading stations…")
                 }
-                if (query.length >= 2) {
-                    val matches = stations
-                        .filter { it.name.contains(query, ignoreCase = true) || it.code.equals(query, ignoreCase = true) }
-                        .take(6)
-                    if (matches.isEmpty()) {
-                        Hint("No station found")
-                    } else {
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(MaterialTheme.shapes.large)
-                                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
-                        ) {
-                            matches.forEachIndexed { index, station ->
-                                if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+
+            Section("Favourite stations") {
+                Text(
+                    "On the widget, trains that stop at these are shown in the accent colour, and the " +
+                        "fastest way to each one (possibly with a change) gets a filled highlight and a bold destination.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                favourites.forEach { favourite ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(favourite.label, style = MaterialTheme.typography.titleMedium)
+                            if (favourite.label != favourite.name) {
                                 Text(
-                                    station.name,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            settings.fixedStationUic = station.uic
-                                            settings.fixedStationName = station.name
-                                            settings.fixedStationLatLng = station.lat to station.lng
-                                            fixedName = station.name
-                                            query = ""
-                                            Refresher.requestFetch(ctx)
-                                        }
-                                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                                    favourite.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
+                        TextButton(onClick = {
+                            favourites = favourites - favourite
+                            settings.favourites = favourites
+                            Refresher.requestFetch(ctx)
+                        }) { Text("Remove") }
                     }
+                }
+                if (favourites.size < Favourites.MAX) {
+                    OutlinedTextField(
+                        value = newLabel,
+                        onValueChange = { newLabel = it.take(Favourites.MAX_LABEL) },
+                        label = { Text("Label, e.g. Home or Work") },
+                        singleLine = true,
+                        shape = MaterialTheme.shapes.large,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    StationPicker(stations, "Station to add") { station ->
+                        if (favourites.none { it.uic == station.uic }) {
+                            val label = newLabel.trim().ifEmpty { station.name }
+                            favourites = favourites + Favourite(station.uic, station.name, label)
+                            settings.favourites = favourites
+                            newLabel = ""
+                            Refresher.requestFetch(ctx)
+                        }
+                    }
+                } else {
+                    Hint("Up to ${Favourites.MAX} stations: each one adds a journey-planner call per refresh.")
                 }
             }
 
@@ -279,6 +302,17 @@ fun SettingsScreen() {
                         Refresher.requestFetch(ctx)
                     })
                 }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                Text("NS API calls today: %,d of 5,000".format(apiCallsToday), style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Delays and platform changes refresh every 2 min while a train leaves within 15 min, " +
+                        "every 5–10 min otherwise, and only while the screen is on. " +
+                        "Above ${FetchPolicy.SOFT_DAILY_LIMIT} calls a day it slows to every 15 min.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             Section("Location") {
@@ -317,7 +351,9 @@ fun SettingsScreen() {
             }
 
             Button(
-                onClick = { Refresher.requestFetch(ctx) },
+                onClick = {
+                    if (useNearest && hasForeground) updateLocation() else Refresher.requestFetch(ctx)
+                },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Refresh widget now") }
 
@@ -399,6 +435,51 @@ private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) 
         ) {
             Text(title, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
             content()
+        }
+    }
+}
+
+/** A station search box with up to six matches; [onPick] runs when one is tapped. */
+@Composable
+private fun StationPicker(stations: List<Station>, label: String, onPick: (Station) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    OutlinedTextField(
+        value = query,
+        onValueChange = { query = it },
+        label = { Text(label) },
+        singleLine = true,
+        enabled = stations.isNotEmpty(),
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    if (query.length >= 2) {
+        val matches = stations
+            .filter { it.name.contains(query, ignoreCase = true) || it.code.equals(query, ignoreCase = true) }
+            .take(6)
+        if (matches.isEmpty()) {
+            Hint("No station found")
+        } else {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(MaterialTheme.shapes.large)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+            ) {
+                matches.forEachIndexed { index, station ->
+                    if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Text(
+                        station.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onPick(station)
+                                query = ""
+                            }
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                    )
+                }
+            }
         }
     }
 }

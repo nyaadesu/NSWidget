@@ -24,6 +24,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean(K_SHOW_VIA, true)
         set(value) = prefs.edit { putBoolean(K_SHOW_VIA, value) }
 
+    /** Stations such as Home and Work; trains that reach them are labelled on the widget. */
+    var favourites: List<Favourite>
+        get() = Favourites.decode(prefs.getString(K_FAVOURITES, null))
+        set(value) = prefs.edit { putString(K_FAVOURITES, Favourites.encode(value)) }
+
     var fixedStationUic: String?
         get() = prefs.getString(K_FIXED_UIC, null)
         set(value) = prefs.edit { putString(K_FIXED_UIC, value) }
@@ -74,6 +79,7 @@ class Settings(context: Context) {
         const val K_API_KEY = "api_key"
         const val K_NEAREST = "use_nearest"
         const val K_SHOW_VIA = "show_via"
+        const val K_FAVOURITES = "favourites"
         const val K_FIXED_UIC = "fixed_uic"
         const val K_FIXED_NAME = "fixed_name"
         const val K_FIXED_LAT = "fixed_lat"

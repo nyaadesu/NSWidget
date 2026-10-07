@@ -32,13 +32,21 @@ object LocationHelper {
         }
 
     /**
-     * Stores the best location we can get cheaply, and returns the saved location.
-     * With [allowFresh] it also asks the system for a new fix when nothing is cached
-     * (foreground only).
+     * Stores the best location we can get and returns the saved location.
+     * - By default it uses Android's last known location (cheap, but can be stale).
+     * - [allowFresh] asks for a new fix only when nothing is cached at all.
+     * - [preferFresh] asks for a new fix first (refresh button), falling back to the last known one.
+     * A new fix while the app is closed needs "Allow all the time"; without it Android refuses
+     * and the last known location is used.
      */
-    suspend fun refreshSaved(ctx: Context, allowFresh: Boolean = false): SavedLocation? {
+    suspend fun refreshSaved(
+        ctx: Context,
+        allowFresh: Boolean = false,
+        preferFresh: Boolean = false,
+    ): SavedLocation? {
         val settings = Settings(ctx)
-        var loc = lastKnown(ctx)
+        var loc = if (preferFresh) fresh(ctx, timeoutMs = 8_000) else null
+        if (loc == null) loc = lastKnown(ctx)
         if (loc == null && allowFresh) loc = fresh(ctx)
         val saved = settings.location
         if (loc != null && (saved == null || loc.time > saved.atMillis)) {

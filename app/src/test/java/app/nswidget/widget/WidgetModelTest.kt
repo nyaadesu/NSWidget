@@ -1,7 +1,9 @@
 package app.nswidget.widget
 
 import app.nswidget.data.Departure
+import app.nswidget.data.Favourite
 import app.nswidget.data.Snapshot
+import app.nswidget.data.TripOption
 import app.nswidget.discount.DiscountPhase
 import app.nswidget.discount.PeakRules
 import org.junit.Assert.assertEquals
@@ -293,6 +295,88 @@ class WidgetModelTest {
             WidgetModels.estimateDirectionWidth("Den Haag Centraal") * 1.3f,
             WidgetModels.estimateDirectionWidth("Den Haag Centraal", fontScale = 1.3f),
             0.001f,
+        )
+    }
+
+    private val work = Favourite("8400621", "Utrecht Centraal", "Work")
+    private val home = Favourite("8400180", "Dordrecht", "Home")
+
+    private fun train(inMinutes: Int, number: String?, stops: List<String> = emptyList(),
+                      direction: String = "Amsterdam Centraal", cancelled: Boolean = false) =
+        dep(inMinutes, cancelled = cancelled).copy(trainNumber = number, stops = stops, direction = direction)
+
+    private fun trip(number: String, departIn: Int, arriveIn: Int, transfers: Int = 0, to: Favourite = work) =
+        TripOption(to.uic, number, min(departIn), min(arriveIn), transfers)
+
+    @Test
+    fun fastestWayToAFavouriteIsTaggedEvenWithAChange() {
+        val departures = listOf(
+            train(5, "100", stops = listOf(work.uic)),                 // stops at Work, slower
+            train(10, "200", direction = "Utrecht Centraal"),          // terminates at Work
+            train(12, "300"),                                          // fastest, with one change
+            train(14, "400", stops = listOf(work.uic), cancelled = true),
+            train(20, "500"),                                          // unrelated
+        )
+        val trips = listOf(trip("100", 5, 40), trip("300", 12, 35, transfers = 1))
+        val tags = WidgetModels.favouriteTags(departures, listOf(work), trips, nowMs)
+
+        assertEquals(listOf(RowTag("Work", fastest = false)), tags[0])
+        assertEquals(listOf(RowTag("Work", fastest = false)), tags[1])
+        assertEquals(listOf(RowTag("Work", fastest = true, transfers = 1)), tags[2])
+        assertTrue("cancelled trains get nothing", tags[3].isEmpty())
+        assertTrue(tags[4].isEmpty())
+    }
+
+    @Test
+    fun aJourneyThatCanNoLongerBeCaughtIsNotTheFastest() {
+        val departures = listOf(train(6, "700", stops = listOf(work.uic)))
+        // "600" left two minutes ago and would have arrived first; "700" is the best one left.
+        val trips = listOf(trip("600", -2, 20), trip("700", 6, 45))
+        val tags = WidgetModels.favouriteTags(departures, listOf(work), trips, nowMs)
+        assertEquals(listOf(RowTag("Work", fastest = true)), tags[0])
+    }
+
+    @Test
+    fun aDirectPlannedJourneyCountsAsStoppingThere() {
+        // No stop list for this train, but the planner says it goes straight to Work.
+        val departures = listOf(train(8, "800"), train(3, "900"))
+        val trips = listOf(trip("800", 8, 50), trip("900", 3, 30))
+        val tags = WidgetModels.favouriteTags(departures, listOf(work), trips, nowMs)
+        assertEquals(listOf(RowTag("Work", fastest = false)), tags[0])
+        assertEquals(listOf(RowTag("Work", fastest = true)), tags[1])
+    }
+
+    @Test
+    fun aTrainCanServeSeveralFavouritesWithTheFastestFirst() {
+        val departures = listOf(train(5, "100", stops = listOf(home.uic, work.uic)))
+        val trips = listOf(trip("100", 5, 25, to = work))
+        val tags = WidgetModels.favouriteTags(departures, listOf(home, work), trips, nowMs)
+        assertEquals(listOf(RowTag("Work", fastest = true), RowTag("Home", fastest = false)), tags[0])
+    }
+
+    @Test
+    fun tagsReachTheWidgetRows() {
+        val snapshot = snapshot(listOf(train(5, "100", stops = listOf(work.uic))))
+            .copy(trips = listOf(trip("100", 5, 40)))
+        val model = WidgetModels.build(now, hasKey = true, snapshot = snapshot, favourites = listOf(work))
+        assertEquals(listOf(RowTag("Work", fastest = true)), model.rows.single().tags)
+        assertTrue(WidgetModels.build(now, hasKey = true, snapshot = snapshot).rows.single().tags.isEmpty())
+    }
+
+    private fun rowWith(vararg tags: RowTag) = DepartureRow(
+        time = "10:00", delayMinutes = 0, category = "IC", direction = "Utrecht Centraal",
+        track = "5", trackChanged = false, cancelled = false, via = emptyList(), tags = tags.toList(),
+    )
+
+    @Test
+    fun highlightIsColourOnlyAndTheFastestWins() {
+        assertEquals(Highlight.NONE, rowWith().highlight)
+        assertEquals(Highlight.STOPS, rowWith(RowTag("Work", fastest = false)).highlight)
+        assertEquals(Highlight.FASTEST, rowWith(RowTag("Work", fastest = true, transfers = 1)).highlight)
+        // Fastest to one favourite and merely stopping at another: the stronger highlight wins.
+        assertEquals(
+            Highlight.FASTEST,
+            rowWith(RowTag("Home", fastest = false), RowTag("Work", fastest = true)).highlight,
         )
     }
 

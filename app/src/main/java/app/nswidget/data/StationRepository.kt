@@ -7,12 +7,14 @@ import java.io.File
 
 /** The NS station list, cached on disk in a compact form (it rarely changes). */
 class StationRepository(context: Context) {
-    private val file = File(context.applicationContext.filesDir, "stations.json")
+    private val appContext = context.applicationContext
+    private val file = File(appContext.filesDir, "stations.json")
 
     /** Blocking: call from a background thread. */
     fun load(apiKey: String): List<Station> {
         cached(maxAgeMs = REFRESH_AFTER_MS)?.let { return it }
         return try {
+            ApiUsage(appContext).record()
             val stations = NsApi.parseStations(NsApi.fetchStationsJson(apiKey))
             if (stations.isNotEmpty()) file.writeText(serialize(stations))
             stations

@@ -28,6 +28,14 @@ object NsApi {
         return parseDepartures(get(url, apiKey), originName)
     }
 
+    /** Journey-planner options from one station to another, starting now. */
+    fun fetchTrips(apiKey: String, fromUic: String, toUic: String): List<TripOption> {
+        val from = URLEncoder.encode(fromUic, "UTF-8")
+        val to = URLEncoder.encode(toUic, "UTF-8")
+        val url = "$BASE/reisinformatie-api/api/v3/trips?originUicCode=$from&destinationUicCode=$to"
+        return parseTrips(get(url, apiKey), toUic)
+    }
+
     private fun get(url: String, apiKey: String): String {
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
@@ -69,9 +77,10 @@ object NsApi {
                 ?: product?.str("shortCategoryName")
                 ?: ""
             val direction = o.str("direction") ?: ""
-            val stops = o.optJSONArray("routeStations")?.let { arr ->
-                (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.str("mediumName") }
+            val route = o.optJSONArray("routeStations")?.let { arr ->
+                (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
             }.orEmpty()
+            val stopNames = route.mapNotNull { it.str("mediumName") }
             result += Departure(
                 plannedAt = planned,
                 actualAt = actual,
@@ -80,7 +89,9 @@ object NsApi {
                 plannedTrack = o.str("plannedTrack"),
                 actualTrack = o.str("actualTrack"),
                 cancelled = o.optBoolean("cancelled", false),
-                via = MajorCities.via(stops, originName, direction),
+                via = MajorCities.via(stopNames, originName, direction),
+                trainNumber = product?.str("number"),
+                stops = route.mapNotNull { it.str("uicCode") },
             )
         }
         return result
@@ -107,6 +118,37 @@ object NsApi {
         }
         return result
     }
+
+    /**
+     * Turns a journey-planner response into one [TripOption] per usable journey. Walking legs are
+     * skipped; journeys that are cancelled or impossible, or have a cancelled leg, are dropped.
+     */
+    fun parseTrips(json: String, favouriteUic: String): List<TripOption> {
+        val root = JSONObject(json)
+        val trips = root.optJSONArray("trips")
+            ?: root.optJSONObject("payload")?.optJSONArray("trips")
+            ?: return emptyList()
+        val result = ArrayList<TripOption>(trips.length())
+        for (i in 0 until trips.length()) {
+            val trip = trips.optJSONObject(i) ?: continue
+            val status = trip.str("status")
+            if (status == "CANCELLED" || status == "NOT_POSSIBLE") continue
+            val legs = trip.optJSONArray("legs") ?: continue
+            val rides = (0 until legs.length())
+                .mapNotNull { legs.optJSONObject(it) }
+                .filter { it.optJSONObject("product")?.str("number") != null }
+            if (rides.isEmpty() || rides.any { it.optBoolean("cancelled", false) }) continue
+            val trainNumber = rides.first().optJSONObject("product")?.str("number") ?: continue
+            val departAt = stopTime(rides.first().optJSONObject("origin")) ?: continue
+            val arriveAt = stopTime(rides.last().optJSONObject("destination")) ?: continue
+            result += TripOption(favouriteUic, trainNumber, departAt, arriveAt, transfers = rides.size - 1)
+        }
+        return result
+    }
+
+    /** Real-time if known, otherwise the timetable. */
+    private fun stopTime(stop: JSONObject?): Long? =
+        stop?.let { parseTime(it.str("actualDateTime")) ?: parseTime(it.str("plannedDateTime")) }
 
     // NS timestamps look like "2026-10-06T10:04:00+0200" (no colon in the offset).
     private val NS_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssZ")
