@@ -1,7 +1,10 @@
 package app.nswidget.widget
 
 import app.nswidget.data.Departure
+import app.nswidget.data.Favourite
+import app.nswidget.data.Favourites
 import app.nswidget.data.Snapshot
+import app.nswidget.data.TripOption
 import app.nswidget.discount.DiscountLabel
 import app.nswidget.discount.DiscountPhase
 import app.nswidget.discount.DiscountText
@@ -22,7 +25,33 @@ data class DepartureRow(
     val cancelled: Boolean,
     /** Major cities along the route, in order; empty when unknown or switched off. */
     val via: List<String>,
-)
+    /** Favourite stations this train gets you to, fastest-way-there first. */
+    val tags: List<RowTag> = emptyList(),
+) {
+    /** How the row is highlighted: only by colour, no extra text or icons. */
+    val highlight: Highlight
+        get() = when {
+            tags.any { it.fastest } -> Highlight.FASTEST
+            tags.isNotEmpty() -> Highlight.STOPS
+            else -> Highlight.NONE
+        }
+}
+
+enum class Highlight {
+    NONE,
+
+    /** The train stops at a favourite station: a soft tint. */
+    STOPS,
+
+    /** Boarding this train is the fastest way to a favourite (maybe with a change): a strong tint. */
+    FASTEST,
+}
+
+/**
+ * A favourite station a departure gets you to. [fastest]: boarding this train is the quickest way
+ * there (possibly with [transfers] changes); otherwise the train simply stops there.
+ */
+data class RowTag(val label: String, val fastest: Boolean, val transfers: Int = 0)
 
 /** Everything the widget needs to draw itself, already resolved into display strings. */
 data class WidgetModel(
@@ -43,15 +72,22 @@ object WidgetModels {
     const val MAX_ROWS = 8
     private val HHMM = DateTimeFormatter.ofPattern("HH:mm", Locale.ENGLISH)
 
-    fun build(now: ZonedDateTime, hasKey: Boolean, snapshot: Snapshot?, showVia: Boolean = true): WidgetModel {
+    fun build(
+        now: ZonedDateTime,
+        hasKey: Boolean,
+        snapshot: Snapshot?,
+        showVia: Boolean = true,
+        favourites: List<Favourite> = emptyList(),
+    ): WidgetModel {
         val status = discountStatus(now)
         val nowMs = now.toInstant().toEpochMilli()
 
         // Drop trains that have already left (the data may be a few minutes old).
-        val rows = snapshot?.departures.orEmpty()
+        val departures = snapshot?.departures.orEmpty()
             .filter { it.actualAt >= nowMs - 60_000 }
             .take(MAX_ROWS)
-            .map { it.toRow(showVia) }
+        val tags = favouriteTags(departures, favourites, snapshot?.trips.orEmpty(), nowMs)
+        val rows = departures.mapIndexed { i, departure -> departure.toRow(showVia, tags[i]) }
 
         val message = when {
             !hasKey -> "Add your NS API key in the app to see departures"
@@ -82,7 +118,7 @@ object WidgetModels {
         )
     }
 
-    private fun Departure.toRow(showVia: Boolean) = DepartureRow(
+    private fun Departure.toRow(showVia: Boolean, tags: List<RowTag>) = DepartureRow(
         time = formatTime(actualAt),
         delayMinutes = delayMinutes,
         category = category,
@@ -91,7 +127,50 @@ object WidgetModels {
         trackChanged = trackChanged,
         cancelled = cancelled,
         via = if (showVia && !cancelled) via else emptyList(),
+        tags = tags,
     )
+
+    /**
+     * For each departure, the favourite stations it gets you to (aligned with [departures]).
+     *
+     * - Fastest: per favourite, the planned journey that arrives earliest and can still be caught;
+     *   the departure it starts with gets a "fastest" tag, even if the journey involves changes.
+     * - Stops there: the favourite is one of the train's stops, is where it terminates, or the
+     *   planner has a direct journey starting with this train.
+     * Cancelled trains get no tags.
+     */
+    fun favouriteTags(
+        departures: List<Departure>,
+        favourites: List<Favourite>,
+        trips: List<TripOption>,
+        nowMs: Long,
+    ): List<List<RowTag>> {
+        val fastest = favourites.associate { favourite ->
+            favourite.uic to trips
+                .filter { it.favouriteUic == favourite.uic && it.departAt >= nowMs - 60_000 }
+                .minByOrNull { it.arriveAt }
+        }
+        return departures.map { departure ->
+            if (departure.cancelled) return@map emptyList()
+            val number = departure.trainNumber
+            val tags = favourites.mapNotNull { favourite ->
+                val best = fastest[favourite.uic]
+                val label = Favourites.shortLabel(favourite.label)
+                when {
+                    best != null && number != null && best.trainNumber == number ->
+                        RowTag(label, fastest = true, transfers = best.transfers)
+                    favourite.uic in departure.stops ||
+                        departure.direction.trim().equals(favourite.name.trim(), ignoreCase = true) ||
+                        (number != null && trips.any {
+                            it.favouriteUic == favourite.uic && it.transfers == 0 && it.trainNumber == number
+                        }) ->
+                        RowTag(label, fastest = false)
+                    else -> null
+                }
+            }
+            tags.sortedByDescending { it.fastest }
+        }
+    }
 
     private fun formatTime(epochMs: Long): String =
         Instant.ofEpochMilli(epochMs).atZone(PeakRules.ZONE).format(HHMM)

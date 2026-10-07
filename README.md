@@ -11,7 +11,12 @@ An Android home-screen widget for the Dutch railways (NS) that shows
    Next to each destination, in small dimmed text, the major cities the train calls at are listed ("Rotterdam, Delft")
    (only as many as fit, so it never costs a departure row; switch it off in the app). Which places count
    as major is a list in [`MajorCities.kt`](app/src/main/java/app/nswidget/data/MajorCities.kt).
-3. **Material You styling** (Material 3 Expressive, as used by recent Android versions): the widget and app
+3. **Favourite stations** (up to 3, e.g. Home and Work, set in the app). Highlighting is colour only,
+   no extra text: trains that stop at a favourite show their time and destination in the accent colour,
+   and the train that starts the fastest journey there (earliest arrival from NS's journey planner,
+   possibly with a change) gets a filled, fully rounded highlight and a bold destination. Each favourite costs one journey-planner call at most every
+   5 minutes while the screen is on.
+4. **Material You styling** (Material 3 Expressive, as used by recent Android versions): the widget and app
    follow your wallpaper's dynamic colours, use large rounded shapes and tonal containers, and the app icon
    supports themed icons. The discount banner stays green / amber / red and platform signs stay NS yellow so
    they read at a glance on any wallpaper. Buttons and the status badge are scalloped "cookie" shapes, like the
@@ -44,13 +49,19 @@ The discount banner works without an API key or location.
 
 ## How it stays up to date
 
-- An inexact alarm repaints the widget: every 15 min normally, every 5 min in the hour before the
-  discount starts/ends, every minute in the last 10 minutes, and once just after the boundary so the
-  banner flips on time. Repainting needs no network.
-- Departures are re-fetched (WorkManager, needs network) when they're older than ~9 minutes,
-  and when you tap the refresh icon on the widget.
-- Between repaints the displayed minute count can be a little behind; the banner's second line shows
-  the exact clock time. Tapping refresh updates it immediately.
+- The widget repaints once a minute, just after the clock minute changes, so countdowns are right
+  and trains that have left drop off the list. Repainting reads saved data and needs no network.
+- The alarm doesn't wake the phone: with the screen off nothing happens (no battery, no API calls),
+  and the overdue repaint runs as soon as you turn the screen on. Android may deliver it a few
+  seconds late, and can delay it more if the app hasn't been used for a long time.
+- Departures (including delays and platform changes, which one call returns for the whole station)
+  are fetched while the screen is on, more often when it matters: every 2 min while a train leaves
+  within 15 min, every 5 min if the next one is 15-45 min away, otherwise every 10 min. Failed calls
+  back off to 5 min, and past 2,000 calls in a day it slows to every 15 min. With the screen on for
+  a few hours that's ~100-150 calls a day (the free tier allows 5,000); the app shows today's count.
+- The refresh button also gets a fresh location fix, so the nearest station follows you. Outside the
+  app that needs "Allow all the time" location; otherwise Android's last known location is used.
+  With background access, a location fix older than 10 minutes is also renewed automatically.
 
 ## Layout
 

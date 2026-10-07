@@ -79,6 +79,7 @@ class NsWidget : GlanceAppWidget() {
             hasKey = settings.apiKey.isNotBlank(),
             snapshot = SnapshotStore(context).load(),
             showVia = settings.showVia,
+            favourites = settings.favourites,
         )
         provideContent {
             GlanceTheme {
@@ -90,7 +91,8 @@ class NsWidget : GlanceAppWidget() {
 
 class RefreshAction : ActionCallback {
     override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
-        Refresher.requestFetch(context)
+        // Get a new location fix first, so the nearest station follows you when you press refresh.
+        Refresher.requestFetch(context, freshLocation = true)
         Refresher.start(context)
         NsWidget().updateAll(context) // repaint the discount banner straight away
     }
@@ -135,14 +137,15 @@ private fun WidgetContent(model: WidgetModel) {
                 .fillMaxWidth()
                 .background(GlanceTheme.colors.surfaceVariant)
                 .rounded(22.dp)
-                .padding(horizontal = 12.dp, vertical = 3.dp),
+                // Rows add another 8dp each side, so the fastest-train pill reaches a little past its text.
+                .padding(horizontal = 4.dp, vertical = 3.dp),
         ) {
             if (model.message != null) {
                 Text(
                     text = model.message,
                     style = text(GlanceTheme.colors.onSurfaceVariant, 13),
                     maxLines = 3,
-                    modifier = GlanceModifier.padding(vertical = 8.dp),
+                    modifier = GlanceModifier.padding(horizontal = 8.dp, vertical = 8.dp),
                 )
             } else {
                 rows.forEach {
@@ -288,10 +291,24 @@ private fun DepartureLine(
     contentWidthDp: Float,
     dual: Boolean,
 ) {
-    val primary = if (row.cancelled) GlanceTheme.colors.onSurfaceVariant else GlanceTheme.colors.onSurface
+    // Trains to a favourite station are highlighted by colour alone. Stopping there: the time and
+    // destination in the theme's accent colour. The fastest way there: a filled pill with a bold
+    // destination. Two clearly different levels, and only one heavy element on the list.
+    val highlight = row.highlight
+    val pill = if (highlight == Highlight.FASTEST) GlanceTheme.colors.primaryContainer else null
+    val primary = when {
+        highlight == Highlight.FASTEST -> GlanceTheme.colors.onPrimaryContainer
+        highlight == Highlight.STOPS -> GlanceTheme.colors.primary
+        row.cancelled -> GlanceTheme.colors.onSurfaceVariant
+        else -> GlanceTheme.colors.onSurface
+    }
+    // Secondary text (train type, cities) keeps its quieter colour, except on the pill, where the
+    // pill's own text colour stays readable.
+    val secondary = if (pill == null) GlanceTheme.colors.onSurfaceVariant else primary
+    val cities = if (pill == null) GlanceTheme.colors.outline else primary
 
-    // Width taken by everything except the destination: time, delay, train type, platform sign.
     val fontScale = LocalContext.current.resources.configuration.fontScale
+    // Width taken by everything except the destination: time, delay, train type, platform sign.
     val taken = 60f + delaySlot.value + (if (compact) 0f else 34f) + 34f + 8f
     // Two-line rows give the cities their own line under the destination, so they only need to
     // fit the destination's column. Otherwise they share the destination's line and only appear
@@ -313,10 +330,31 @@ private fun DepartureLine(
         )
     }
 
+    val rowHeight = (if (dual) WidgetModels.dualRowDp(fontScale) else WidgetModels.SINGLE_ROW_DP).dp
+    // The outer box keeps 1dp above and below, so a pill never touches the rows next to it.
+    Box(modifier = GlanceModifier.fillMaxWidth().height(rowHeight).padding(vertical = 1.dp)) {
+        DepartureLineContent(row, compact, delaySlot, dual, via, pill, rowHeight, primary, secondary, cities)
+    }
+}
+
+@Composable
+private fun DepartureLineContent(
+    row: DepartureRow,
+    compact: Boolean,
+    delaySlot: Dp,
+    dual: Boolean,
+    via: String?,
+    pill: ColorProvider?,
+    rowHeight: Dp,
+    primary: ColorProvider,
+    secondary: ColorProvider,
+    cities: ColorProvider,
+) {
+    val inner = GlanceModifier.fillMaxSize()
     Row(
-        modifier = GlanceModifier
-            .fillMaxWidth()
-            .height((if (dual) WidgetModels.dualRowDp(fontScale) else WidgetModels.SINGLE_ROW_DP).dp),
+        // Fully rounded ends; 8dp inside so the text clears the curve.
+        modifier = (if (pill != null) inner.background(pill).rounded(rowHeight / 2) else inner)
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -340,55 +378,54 @@ private fun DepartureLine(
         if (!compact) {
             Text(
                 text = row.category,
-                style = text(GlanceTheme.colors.onSurfaceVariant, 11),
+                style = text(secondary, 11),
                 modifier = GlanceModifier.width(34.dp),
                 maxLines = 1,
             )
         }
+        val boldDestination = pill != null
         if (dual) {
             Column(modifier = GlanceModifier.defaultWeight()) {
                 Text(
                     text = row.direction,
-                    style = text(primary, 13, strike = row.cancelled),
+                    style = text(primary, 13, bold = boldDestination, strike = row.cancelled),
                     maxLines = 1,
                 )
                 if (via != null) {
                     Text(
                         text = via,
-                        style = text(GlanceTheme.colors.outline, WidgetModels.VIA_DUAL_SP),
+                        style = text(cities, WidgetModels.VIA_DUAL_SP),
                         maxLines = 1,
                     )
                 }
             }
-        } else if (via != null) {
-            Text(
-                text = row.direction,
-                style = text(primary, 14, strike = row.cancelled),
-                maxLines = 1,
-            )
-            Spacer(GlanceModifier.defaultWeight())
-            // No "via" prefix: the dimmer colour and the gap already set the cities apart. They sit
-            // at the bottom right of the row, like a caption, with a little room below so the text's
-            // baseline lines up with the destination's.
-            Column(
-                modifier = GlanceModifier.fillMaxHeight(),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                Text(
-                    text = via,
-                    style = text(GlanceTheme.colors.outline, WidgetModels.VIA_INLINE_SP),
-                    maxLines = 1,
-                    modifier = GlanceModifier.padding(bottom = 3.dp),
-                )
-            }
             Spacer(GlanceModifier.width(8.dp))
         } else {
+            // The destination takes whatever width is left (and is cut short if it must), so the
+            // cities and the platform sign always keep their room.
             Text(
                 text = row.direction,
-                style = text(primary, 14, strike = row.cancelled),
+                style = text(primary, 14, bold = boldDestination, strike = row.cancelled),
                 modifier = GlanceModifier.defaultWeight(),
                 maxLines = 1,
             )
+            if (via != null) {
+                // No "via" prefix: the dimmer colour and the gap already set the cities apart. They
+                // sit at the bottom right of the row, like a caption, with a little room below so the
+                // text's baseline lines up with the destination's.
+                Column(
+                    modifier = GlanceModifier.fillMaxHeight(),
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    Text(
+                        text = via,
+                        style = text(cities, WidgetModels.VIA_INLINE_SP),
+                        maxLines = 1,
+                        modifier = GlanceModifier.padding(bottom = 2.dp),
+                    )
+                }
+                Spacer(GlanceModifier.width(8.dp))
+            }
         }
         PlatformChip(row)
     }

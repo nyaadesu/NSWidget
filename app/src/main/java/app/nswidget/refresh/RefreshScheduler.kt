@@ -6,43 +6,42 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import app.nswidget.discount.PeakRules
-import app.nswidget.discount.discountStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.time.ZonedDateTime
 
 /**
- * Arms one inexact alarm at a time. Each tick reschedules the next one, so the interval can adapt:
- * every minute in the last 10 minutes before the discount starts/ends (so "wait x minutes" is right),
- * every 5 minutes in the hour before, and every 15 minutes otherwise. The final tick lands just after
- * the boundary so the banner flips on time.
+ * Repaints the widget once a minute, just after the clock minute changes, so countdowns and the
+ * list of departures are always current. A repaint only re-reads saved data; the NS API is called
+ * separately and less often (see [FetchPolicy]).
+ *
+ * The alarm is non-waking: while the screen is off it simply waits, costing no battery and no API
+ * calls, and it fires as soon as the phone wakes up - so the widget is fresh when you look at it.
  */
 object RefreshScheduler {
     private const val ACTION_TICK = "app.nswidget.TICK"
 
     fun scheduleNext(ctx: Context, now: ZonedDateTime = ZonedDateTime.now(PeakRules.ZONE)) {
-        val nowMs = now.toInstant().toEpochMilli()
-        val triggerAt = nowMs + nextDelayMs(now)
+        val triggerAt = now.toInstant().toEpochMilli() + nextDelayMs(now)
         val alarms = ctx.getSystemService(AlarmManager::class.java) ?: return
-        // Inexact on purpose: exact alarms need a special permission, and a few minutes of
-        // slack while the phone sleeps doesn't matter (the screen is off, nobody is looking).
-        alarms.setAndAllowWhileIdle(AlarmManager.RTC, triggerAt, pendingIntent(ctx))
+        // RTC (not RTC_WAKEUP) never wakes the phone, and inexact alarms need no special
+        // permission; Android may deliver a tick a little late, which is fine for a repaint.
+        alarms.set(AlarmManager.RTC, triggerAt, pendingIntent(ctx))
     }
 
     fun cancel(ctx: Context) {
         ctx.getSystemService(AlarmManager::class.java)?.cancel(pendingIntent(ctx))
     }
 
+    /**
+     * One second after the start of the next clock minute. Peak boundaries fall on whole minutes,
+     * so this also flips the discount banner on time. Never less than 5 s, so ticks can't pile up.
+     */
     internal fun nextDelayMs(now: ZonedDateTime): Long {
-        val status = discountStatus(now)
-        val untilChangeMs = status.changesAt.toInstant().toEpochMilli() - now.toInstant().toEpochMilli()
-        val interval = when {
-            status.minutesUntilChange <= 10 -> 60_000L
-            status.minutesUntilChange <= PeakRules.WARN_MINUTES -> 5 * 60_000L
-            else -> 15 * 60_000L
-        }
-        return minOf(interval, untilChangeMs + 1_000L).coerceAtLeast(30_000L)
+        val msIntoMinute = now.second * 1_000L + now.nano / 1_000_000L
+        val delay = 60_000L - msIntoMinute + 1_000L
+        return if (delay < 5_000L) delay + 60_000L else delay
     }
 
     private fun pendingIntent(ctx: Context): PendingIntent = PendingIntent.getBroadcast(

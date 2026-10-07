@@ -24,6 +24,10 @@ data class Departure(
     val cancelled: Boolean,
     /** Major cities the train calls at, in order (see [MajorCities]). */
     val via: List<String> = emptyList(),
+    /** NS train number, e.g. "2150"; links a departure to a planned journey. */
+    val trainNumber: String? = null,
+    /** UIC codes of the stations the train calls at after this one. */
+    val stops: List<String> = emptyList(),
 ) {
     val track: String? get() = actualTrack ?: plannedTrack
     val trackChanged: Boolean
@@ -39,6 +43,8 @@ data class Departure(
         actualTrack?.let { put("at", it) }
         put("x", cancelled)
         if (via.isNotEmpty()) put("v", JSONArray(via))
+        trainNumber?.let { put("n", it) }
+        if (stops.isNotEmpty()) put("s", JSONArray(stops))
     }
 
     companion object {
@@ -50,7 +56,39 @@ data class Departure(
             plannedTrack = if (o.has("pt")) o.getString("pt") else null,
             actualTrack = if (o.has("at")) o.getString("at") else null,
             cancelled = o.optBoolean("x", false),
-            via = o.optJSONArray("v")?.let { arr -> (0 until arr.length()).map { arr.getString(it) } }.orEmpty(),
+            via = o.optJSONArray("v").strings(),
+            trainNumber = if (o.has("n")) o.getString("n") else null,
+            stops = o.optJSONArray("s").strings(),
+        )
+    }
+}
+
+/**
+ * One option from the NS journey planner for getting to a favourite station: which train to board
+ * here, when it leaves, when you arrive, and how many changes it takes.
+ */
+data class TripOption(
+    val favouriteUic: String,
+    /** Train number of the first train of the journey - the one you board here. */
+    val trainNumber: String,
+    val departAt: Long,
+    val arriveAt: Long,
+    val transfers: Int,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("f", favouriteUic)
+        .put("n", trainNumber)
+        .put("d", departAt)
+        .put("a", arriveAt)
+        .put("t", transfers)
+
+    companion object {
+        fun fromJson(o: JSONObject) = TripOption(
+            favouriteUic = o.getString("f"),
+            trainNumber = o.getString("n"),
+            departAt = o.getLong("d"),
+            arriveAt = o.getLong("a"),
+            transfers = o.optInt("t", 0),
         )
     }
 }
@@ -69,6 +107,14 @@ data class Snapshot(
     /** Station coordinates, for the "open in maps" button. Null if unknown. */
     val lat: Double? = null,
     val lng: Double? = null,
+    /** When we last tried to fetch; differs from [fetchedAt] (last success) after a failure. */
+    val attemptedAt: Long = fetchedAt,
+    /** Journey-planner results towards the favourite stations (see [TripOption]). */
+    val trips: List<TripOption> = emptyList(),
+    /** When [trips] were last requested. */
+    val tripsFetchedAt: Long = 0L,
+    /** Which station and favourites [trips] were planned for; see [Favourites.key]. */
+    val tripsKey: String = "",
 ) {
     fun toJson(): String = JSONObject().apply {
         put("uic", stationUic)
@@ -76,27 +122,40 @@ data class Snapshot(
         distanceMeters?.let { put("dist", it) }
         lat?.let { put("lat", it) }
         lng?.let { put("lng", it) }
+        put("try", attemptedAt)
         put("at", fetchedAt)
         error?.let { put("err", it) }
         put("deps", JSONArray().apply { departures.forEach { put(it.toJson()) } })
+        if (trips.isNotEmpty()) put("trips", JSONArray().apply { trips.forEach { put(it.toJson()) } })
+        put("tat", tripsFetchedAt)
+        put("tkey", tripsKey)
     }.toString()
 
     companion object {
         fun fromJson(json: String): Snapshot? = try {
             val o = JSONObject(json)
             val arr = o.getJSONArray("deps")
+            val fetchedAt = o.getLong("at")
+            val trips = o.optJSONArray("trips")
             Snapshot(
                 stationUic = o.optString("uic"),
                 stationName = o.optString("name"),
                 distanceMeters = if (o.has("dist")) o.getInt("dist") else null,
-                fetchedAt = o.getLong("at"),
+                fetchedAt = fetchedAt,
                 departures = (0 until arr.length()).map { Departure.fromJson(arr.getJSONObject(it)) },
                 error = if (o.has("err")) o.getString("err") else null,
                 lat = if (o.has("lat")) o.getDouble("lat") else null,
                 lng = if (o.has("lng")) o.getDouble("lng") else null,
+                attemptedAt = if (o.has("try")) o.getLong("try") else fetchedAt,
+                trips = trips?.let { t -> (0 until t.length()).map { TripOption.fromJson(t.getJSONObject(it)) } }.orEmpty(),
+                tripsFetchedAt = o.optLong("tat", 0L),
+                tripsKey = o.optString("tkey"),
             )
         } catch (e: Exception) {
             null
         }
     }
 }
+
+private fun JSONArray?.strings(): List<String> =
+    this?.let { arr -> (0 until arr.length()).map { arr.getString(it) } }.orEmpty()

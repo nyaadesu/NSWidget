@@ -72,6 +72,15 @@ class NsApiTest {
     }
 
     @Test
+    fun keepsTrainNumberAndStopCodesForFavouriteMatching() {
+        val (ic, spr) = NsApi.parseDepartures(departuresJson)
+        assertEquals("2150", ic.trainNumber)
+        assertEquals(listOf("8400530", "8400561", "8400058"), ic.stops)
+        assertNull("no number in the product", spr.trainNumber)
+        assertTrue(spr.stops.isEmpty())
+    }
+
+    @Test
     fun parsesCancelledDepartureWithNullFields() {
         val spr = NsApi.parseDepartures(departuresJson)[1]
         assertTrue(spr.cancelled)
