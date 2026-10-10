@@ -186,6 +186,32 @@ class WidgetModelTest {
     }
 
     @Test
+    fun disruptedTrainsCarryAWarning() {
+        val departures = listOf(
+            dep(5).copy(direction = "Rotterdam Centraal", shortened = true, plannedDirection = "Den Haag Centraal"),
+            dep(7).copy(direction = "Rotterdam Centraal", shortened = true),
+            dep(9).copy(skippedStops = listOf("Delft Campus", "Delft")),
+            dep(11, cancelled = true).copy(shortened = true, plannedDirection = "Den Haag Centraal"),
+        )
+        val rows = WidgetModels.build(now, hasKey = true, snapshot = snapshot(departures)).rows
+        assertTrue(rows[0].shortened)
+        assertEquals(listOf("not to Den Haag Centraal", "ends early"), rows[0].notices)
+        assertEquals(listOf("ends early"), rows[1].notices)
+        assertEquals(listOf("skips Delft Campus, Delft", "skips Delft Campus +1", "skips stops"), rows[2].notices)
+        assertFalse(rows[3].shortened)
+        assertTrue("a cancelled train needs no other warning", rows[3].notices.isEmpty())
+    }
+
+    @Test
+    fun aPhoneSizedWidgetFitsFiveDepartures() {
+        // Measured on a Pixel at a 1.3x font: the widget is 247 dp tall, and everything but the
+        // rows takes 60 dp plus the banner.
+        val available = 247f - 60f - WidgetModels.bannerHeightDp(1.3f, compact = false)
+        val rows = List(8) { viaRow() }
+        assertEquals(5, WidgetModels.rowLayout(rows, available, fontScale = 1.3f).maxRows)
+    }
+
+    @Test
     fun viaTextUsesAsManyCitiesAsFit() {
         val cities = listOf("Rotterdam", "Delft", "Den Haag")
         // Up to three cities when there is room for them.
@@ -252,7 +278,7 @@ class WidgetModelTest {
 
     @Test
     fun oneLineRowsWhenNoVisibleTrainHasCities() {
-        val layout = WidgetModels.rowLayout(List(8) { viaRow() }, 200f)
+        val layout = WidgetModels.rowLayout(List(8) { viaRow() }, 180f)
         assertFalse(layout.dual)
         assertEquals(7, layout.maxRows)
     }

@@ -29,7 +29,12 @@ import androidx.glance.appwidget.action.actionStartActivity
 import androidx.glance.appwidget.appWidgetBackground
 import androidx.glance.appwidget.cornerRadius
 import androidx.glance.appwidget.provideContent
-import androidx.glance.appwidget.updateAll
+import androidx.compose.runtime.remember
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.glance.appwidget.GlanceAppWidgetManager
+import androidx.glance.appwidget.state.updateAppWidgetState
+import androidx.glance.currentState
+import androidx.glance.state.PreferencesGlanceStateDefinition
 import androidx.glance.background
 import androidx.glance.color.ColorProvider as dayNightColor
 import androidx.glance.layout.Alignment
@@ -62,8 +67,21 @@ import java.time.ZonedDateTime
 private val ChipInk = ColorProvider(Color(0xFF14233F))
 private val ChipWhite = ColorProvider(Color.White)
 
-/** Outer padding, header, banner, the gaps between them and the list card's own padding. */
-private const val FIXED_HEIGHT_DP = 120f
+// The disruption square uses the cancelled-platform red, so "something's wrong" looks the same everywhere.
+private val AlertRed = ColorProvider(Color(0xFFD6455D))
+
+/** Width of the red disruption square beside the discount banner. */
+private val ALERT_WIDTH = 52.dp
+
+/**
+ * Everything above and below the departure rows except the banner: outer padding (2 x 8),
+ * header (32), the two gaps (2 x 4) and the list card's own padding (2 x 2). Spacing is kept
+ * tight so that an extra departure fits.
+ */
+private const val FIXED_HEIGHT_DP = 60f
+private val OUTER_PADDING_V = 8.dp
+private val HEADER_HEIGHT = 32.dp
+private val GAP = 4.dp
 
 /** Outer widget padding (2 x 10) plus the list card's horizontal padding (2 x 12). */
 private const val LIST_SIDE_PADDING_DP = 44f
@@ -72,18 +90,42 @@ class NsWidget : GlanceAppWidget() {
     // Exact sizes let the number of departure rows follow the size the user resizes the widget to.
     override val sizeMode: SizeMode = SizeMode.Exact
 
+    override val stateDefinition = PreferencesGlanceStateDefinition
+
     override suspend fun provideGlance(context: Context, id: GlanceId) {
+        provideContent {
+            // Glance keeps a widget's session open for a while (longer after a tap), and an update
+            // during that time only recomposes this content - it doesn't run provideGlance again.
+            // So the model is built here, keyed on a version that [repaintAll] bumps, never once
+            // up front: otherwise a refresh that lands while the session is open shows old data.
+            val version = currentState(VERSION)
+            val model = remember(version) { buildModel(context) }
+            GlanceTheme {
+                WidgetContent(model)
+            }
+        }
+    }
+
+    private fun buildModel(context: Context): WidgetModel {
         val settings = Settings(context)
-        val model = WidgetModels.build(
+        return WidgetModels.build(
             now = ZonedDateTime.now(PeakRules.ZONE),
             hasKey = settings.apiKey.isNotBlank(),
             snapshot = SnapshotStore(context).load(),
             showVia = settings.showVia,
             favourites = settings.favourites,
         )
-        provideContent {
-            GlanceTheme {
-                WidgetContent(model)
+    }
+
+    companion object {
+        private val VERSION = longPreferencesKey("version")
+
+        /** Redraws every widget from the saved data and the current time. Use this, not updateAll(). */
+        suspend fun repaintAll(context: Context) {
+            val version = System.nanoTime()
+            GlanceAppWidgetManager(context).getGlanceIds(NsWidget::class.java).forEach { id ->
+                updateAppWidgetState(context, id) { it[VERSION] = version }
+                NsWidget().update(context, id)
             }
         }
     }
@@ -91,10 +133,11 @@ class NsWidget : GlanceAppWidget() {
 
 class RefreshAction : ActionCallback {
     override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
-        // Get a new location fix first, so the nearest station follows you when you press refresh.
-        Refresher.requestFetch(context, freshLocation = true)
+        // Renew everything: a new location fix (so the nearest station follows you), departures,
+        // and the journeys to the favourites.
+        Refresher.requestFetch(context, manual = true)
         Refresher.start(context)
-        NsWidget().updateAll(context) // repaint the discount banner straight away
+        NsWidget.repaintAll(context) // repaint the discount banner straight away
     }
 }
 
@@ -106,7 +149,8 @@ private fun WidgetContent(model: WidgetModel) {
     val openMap = model.mapUri?.let { actionStartActivity(mapsIntent(context, it)) }
     val compact = size.width < 200.dp
     val fontScale = context.resources.configuration.fontScale
-    val layout = WidgetModels.rowLayout(model.rows, size.height.value - FIXED_HEIGHT_DP, fontScale)
+    val bannerHeight = WidgetModels.bannerHeightDp(fontScale, compact)
+    val layout = WidgetModels.rowLayout(model.rows, size.height.value - FIXED_HEIGHT_DP - bannerHeight, fontScale)
     val rows = if (model.message == null) model.rows.take(layout.maxRows) else emptyList()
     // Only make room for a delay ("+3") when a visible train is actually late, and only as wide
     // as its digits need - so on-time boards have no gap at all.
@@ -125,20 +169,32 @@ private fun WidgetContent(model: WidgetModel) {
             .appWidgetBackground()
             .background(GlanceTheme.colors.widgetBackground)
             .roundedBySystem()
-            .padding(10.dp)
+            .padding(horizontal = 10.dp, vertical = OUTER_PADDING_V)
             .clickable(openApp),
     ) {
         Header(model, compact, openMap)
-        Spacer(GlanceModifier.height(6.dp))
-        DiscountBanner(model, compact)
-        Spacer(GlanceModifier.height(6.dp))
+        Spacer(GlanceModifier.height(GAP))
+        // The banner row has a fixed height, which the row count is worked out from and the
+        // disruption square fills (a full-height child of a wrap-content row would stretch to the
+        // whole widget instead).
+        Row(
+            modifier = GlanceModifier.fillMaxWidth().height(bannerHeight.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            DiscountBanner(model, compact, GlanceModifier.defaultWeight().fillMaxHeight())
+            model.disruption?.let { alert ->
+                Spacer(GlanceModifier.width(6.dp))
+                DisruptionSquare(alert, actionStartActivity(Intent(Intent.ACTION_VIEW, Uri.parse(alert.url))))
+            }
+        }
+        Spacer(GlanceModifier.height(GAP))
         Column(
             modifier = GlanceModifier
                 .fillMaxWidth()
                 .background(GlanceTheme.colors.surfaceVariant)
                 .rounded(22.dp)
                 // Rows add another 8dp each side, so the fastest-train pill reaches a little past its text.
-                .padding(horizontal = 4.dp, vertical = 3.dp),
+                .padding(horizontal = 4.dp, vertical = 2.dp),
         ) {
             if (model.message != null) {
                 Text(
@@ -160,7 +216,7 @@ private fun WidgetContent(model: WidgetModel) {
 private fun Header(model: WidgetModel, compact: Boolean, openMap: Action?) {
     val button = if (compact) 28.dp else 32.dp
     Row(
-        modifier = GlanceModifier.fillMaxWidth().height(34.dp),
+        modifier = GlanceModifier.fillMaxWidth().height(HEADER_HEIGHT),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (openMap != null) {
@@ -239,7 +295,7 @@ private fun CookieIcon(
 }
 
 @Composable
-private fun DiscountBanner(model: WidgetModel, compact: Boolean) {
+private fun DiscountBanner(model: WidgetModel, compact: Boolean, modifier: GlanceModifier) {
     val tone = StatusPalette.of(model.phase)
     val container = dayNightColor(day = tone.containerDay, night = tone.containerNight)
     val content = dayNightColor(day = tone.contentDay, night = tone.contentNight)
@@ -252,11 +308,10 @@ private fun DiscountBanner(model: WidgetModel, compact: Boolean) {
     val label = model.label
 
     Row(
-        modifier = GlanceModifier
-            .fillMaxWidth()
+        modifier = modifier
             .background(container)
             .rounded(22.dp)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
+            .padding(horizontal = 12.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         CookieIcon(
@@ -283,6 +338,52 @@ private fun DiscountBanner(model: WidgetModel, compact: Boolean) {
     }
 }
 
+/**
+ * Size of the white warning triangle, and how big its symbol is drawn (in dp, whatever the font
+ * size). The symbol is deliberately a bit bigger than the triangle's inside and spills over its edges.
+ */
+private val SIGN_SIZE = 38.dp
+private const val SIGN_SYMBOL_DP = 20f
+
+/**
+ * A red square with a white warning triangle, like a road sign, holding the affected favourite's
+ * emoji; opens NS's explanation. It fills the banner row's fixed height.
+ */
+@Composable
+private fun DisruptionSquare(alert: DisruptionAlert, open: Action) {
+    // The symbol must fit the triangle's drawing, so it ignores the user's font size.
+    val fontScale = LocalContext.current.resources.configuration.fontScale
+    val symbolSp = SIGN_SYMBOL_DP / fontScale
+    Box(
+        modifier = GlanceModifier
+            .width(ALERT_WIDTH)
+            .fillMaxHeight()
+            .background(AlertRed)
+            .rounded(22.dp)
+            .clickable(open),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(modifier = GlanceModifier.size(SIGN_SIZE), contentAlignment = Alignment.Center) {
+            Image(
+                provider = ImageProvider(R.drawable.ic_warning_sign),
+                contentDescription = alert.description,
+                modifier = GlanceModifier.size(SIGN_SIZE),
+            )
+            // A triangle's middle sits low, so the symbol is nudged down from the box's centre.
+            Text(
+                text = alert.symbol,
+                style = TextStyle(
+                    color = AlertRed,
+                    fontSize = symbolSp.sp,
+                    fontWeight = FontWeight.Bold,
+                ),
+                maxLines = 1,
+                modifier = GlanceModifier.padding(top = 9.dp),
+            )
+        }
+    }
+}
+
 @Composable
 private fun DepartureLine(
     row: DepartureRow,
@@ -300,12 +401,20 @@ private fun DepartureLine(
         highlight == Highlight.FASTEST -> GlanceTheme.colors.onPrimaryContainer
         highlight == Highlight.STOPS -> GlanceTheme.colors.primary
         row.cancelled -> GlanceTheme.colors.onSurfaceVariant
+        row.shortened -> GlanceTheme.colors.error
         else -> GlanceTheme.colors.onSurface
     }
     // Secondary text (train type, cities) keeps its quieter colour, except on the pill, where the
     // pill's own text colour stays readable.
     val secondary = if (pill == null) GlanceTheme.colors.onSurfaceVariant else primary
-    val cities = if (pill == null) GlanceTheme.colors.outline else primary
+    // A disruption warning takes the cities' place, in the error colour so it stands out.
+    val warning = row.notices.isNotEmpty()
+    val cities = when {
+        pill != null -> primary
+        warning -> GlanceTheme.colors.error
+        else -> GlanceTheme.colors.outline
+    }
+    val captions = if (warning) row.notices else row.via
 
     val fontScale = LocalContext.current.resources.configuration.fontScale
     // Width taken by everything except the destination: time, delay, train type, platform sign.
@@ -314,26 +423,36 @@ private fun DepartureLine(
     // fit the destination's column. Otherwise they share the destination's line and only appear
     // when there's clear room - either way they never squeeze the platform sign.
     val via = if (dual) {
-        WidgetModels.viaText(
-            row.via, contentWidthDp - taken, fontScale,
-            charDp = WidgetModels.viaCharDp(WidgetModels.VIA_DUAL_SP),
-        )
+        fitCaption(captions, warning, contentWidthDp - taken, fontScale, WidgetModels.VIA_DUAL_SP, WidgetModels.MAX_VIA)
     } else if (compact) {
         null
     } else {
         val budget = contentWidthDp - taken -
-            WidgetModels.estimateDirectionWidth(row.direction, fontScale) - WidgetModels.VIA_GAP_DP
-        WidgetModels.viaText(
-            row.via, budget, fontScale,
-            charDp = WidgetModels.viaCharDp(WidgetModels.VIA_INLINE_SP),
-            maxCities = WidgetModels.MAX_VIA_INLINE,
-        )
+            WidgetModels.estimateDirectionWidth(row.direction, fontScale, bold = pill != null) - WidgetModels.VIA_GAP_DP
+        fitCaption(captions, warning, budget, fontScale, WidgetModels.VIA_INLINE_SP, WidgetModels.MAX_VIA_INLINE)
     }
 
     val rowHeight = (if (dual) WidgetModels.dualRowDp(fontScale) else WidgetModels.SINGLE_ROW_DP).dp
     // The outer box keeps 1dp above and below, so a pill never touches the rows next to it.
     Box(modifier = GlanceModifier.fillMaxWidth().height(rowHeight).padding(vertical = 1.dp)) {
         DepartureLineContent(row, compact, delaySlot, dual, via, pill, rowHeight, primary, secondary, cities)
+    }
+}
+
+/** Warnings are alternatives (the first that fits wins); cities are a list cut to what fits. */
+private fun fitCaption(
+    captions: List<String>,
+    warning: Boolean,
+    budgetDp: Float,
+    fontScale: Float,
+    sp: Int,
+    maxCities: Int,
+): String? {
+    val charDp = WidgetModels.viaCharDp(sp)
+    return if (warning) {
+        captions.firstNotNullOfOrNull { WidgetModels.viaText(listOf(it), budgetDp, fontScale, charDp, 1) }
+    } else {
+        WidgetModels.viaText(captions, budgetDp, fontScale, charDp = charDp, maxCities = maxCities)
     }
 }
 

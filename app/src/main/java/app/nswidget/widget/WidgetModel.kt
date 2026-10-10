@@ -3,6 +3,7 @@ package app.nswidget.widget
 import app.nswidget.data.Departure
 import app.nswidget.data.Favourite
 import app.nswidget.data.Favourites
+import app.nswidget.data.RouteDisruption
 import app.nswidget.data.Snapshot
 import app.nswidget.data.TripOption
 import app.nswidget.discount.DiscountLabel
@@ -27,6 +28,13 @@ data class DepartureRow(
     val via: List<String>,
     /** Favourite stations this train gets you to, fastest-way-there first. */
     val tags: List<RowTag> = emptyList(),
+    /** The train ends before its usual destination; [direction] is where it now ends. */
+    val shortened: Boolean = false,
+    /**
+     * Disruption warnings, longest first, e.g. "not to Den Haag Centraal", then "ends early":
+     * the widget shows the first that fits, in place of the "via" cities.
+     */
+    val notices: List<String> = emptyList(),
 ) {
     /** How the row is highlighted: only by colour, no extra text or icons. */
     val highlight: Highlight
@@ -53,6 +61,13 @@ enum class Highlight {
  */
 data class RowTag(val label: String, val fastest: Boolean, val transfers: Int = 0)
 
+/**
+ * The red warning square beside the discount banner: something disrupts the way to a favourite.
+ * [url] is NS's explanation of the most serious one. [symbol] goes inside the warning triangle:
+ * the first affected favourite's label when it's a single emoji or character, otherwise "!".
+ */
+data class DisruptionAlert(val url: String, val symbol: String, val description: String)
+
 /** Everything the widget needs to draw itself, already resolved into display strings. */
 data class WidgetModel(
     val phase: DiscountPhase,
@@ -66,6 +81,7 @@ data class WidgetModel(
     val rows: List<DepartureRow>,
     /** Shown in place of [rows] when there is nothing to list. */
     val message: String?,
+    val disruption: DisruptionAlert? = null,
 )
 
 object WidgetModels {
@@ -115,6 +131,56 @@ object WidgetModels {
             offline = snapshot?.error != null,
             rows = rows,
             message = message,
+            disruption = snapshot?.takeIf { it.stationUic.isNotBlank() }
+                ?.let { disruptionAlert(it.disruptions, favourites) },
+        )
+    }
+
+    /**
+     * One visible character, e.g. "💼", "🇳🇱", "👩‍💻" or "W" - something that fits in the triangle.
+     * Counted by hand so it behaves the same everywhere: joiners, variation selectors, skin tones
+     * and keycaps belong to the character before them, and two regional letters make one flag.
+     */
+    internal fun isSingleSymbol(label: String): Boolean {
+        val points = label.codePoints().toArray()
+        if (points.isEmpty()) return false
+        var symbols = 0
+        var i = 0
+        while (i < points.size) {
+            val c = points[i]
+            when {
+                c == ZWJ -> i++ // joins the next character to this one
+                c == VARIATION_SELECTOR || c == KEYCAP || c in SKIN_TONES -> Unit
+                c in REGIONAL_LETTERS && i + 1 < points.size && points[i + 1] in REGIONAL_LETTERS -> {
+                    symbols++
+                    i++
+                }
+                else -> symbols++
+            }
+            i++
+        }
+        return symbols == 1
+    }
+
+    private const val ZWJ = 0x200D
+    private const val VARIATION_SELECTOR = 0xFE0F
+    private const val KEYCAP = 0x20E3
+    private val SKIN_TONES = 0x1F3FB..0x1F3FF
+    private val REGIONAL_LETTERS = 0x1F1E6..0x1F1FF
+
+    /** Most serious first: an emergency, then a disruption, then planned engineering works. */
+    private val SEVERITY = listOf("CALAMITY", "DISRUPTION", "MAINTENANCE")
+
+    /** The warning for disruptions on the way to the (current) favourites, or null if there are none. */
+    fun disruptionAlert(disruptions: List<RouteDisruption>, favourites: List<Favourite>): DisruptionAlert? {
+        val relevant = disruptions.filter { d -> favourites.any { it.uic == d.favouriteUic } }
+        val worst = relevant.minByOrNull { SEVERITY.indexOf(it.type).let { i -> if (i < 0) SEVERITY.size else i } }
+            ?: return null
+        val affected = favourites.filter { f -> relevant.any { it.favouriteUic == f.uic } }
+        return DisruptionAlert(
+            url = NsLinks.disruptionUrl(worst.id, worst.type),
+            symbol = affected.firstOrNull()?.label?.trim()?.takeIf { isSingleSymbol(it) } ?: "!",
+            description = "Disruption to ${affected.joinToString(", ") { it.name }}: ${worst.head}",
         )
     }
 
@@ -128,7 +194,19 @@ object WidgetModels {
         cancelled = cancelled,
         via = if (showVia && !cancelled) via else emptyList(),
         tags = tags,
+        shortened = shortened && !cancelled,
+        notices = if (cancelled) emptyList() else notices(),
     )
+
+    private fun Departure.notices(): List<String> = when {
+        shortened -> listOfNotNull(plannedDirection?.let { "not to $it" }, "ends early")
+        skippedStops.isNotEmpty() -> listOfNotNull(
+            "skips ${skippedStops.joinToString(", ")}",
+            skippedStops.takeIf { it.size > 1 }?.let { "skips ${it.first()} +${it.size - 1}" },
+            "skips stops",
+        )
+        else -> emptyList()
+    }
 
     /**
      * For each departure, the favourite stations it gets you to (aligned with [departures]).
@@ -191,8 +269,23 @@ object WidgetModels {
     /** Estimated width of one character of the cities text at the default font size. */
     fun viaCharDp(sp: Int): Float = sp * 0.46f
 
-    /** Height of a departure row with one line of text (tuned on a phone running a 1.3x font). */
-    const val SINGLE_ROW_DP = 26f
+    /**
+     * Height of the discount banner: its two lines of text (15sp + 12sp, or 13sp + 11sp when
+     * compact) with their line spacing, scaled by the font size, plus 2 x 5dp padding - but never
+     * less than its icon badge needs. On a phone at a 1.3x font scale the banner measured 64 dp
+     * with 2 x 7dp padding, so each sp of text takes ~1.42 dp at 1.0x.
+     */
+    fun bannerHeightDp(fontScale: Float, compact: Boolean): Float {
+        val textSp = if (compact) 13f + 11f else 15f + 12f
+        val icon = if (compact) 28f else 34f
+        return maxOf(textSp * 1.42f * fontScale, icon) + 10f
+    }
+
+    /**
+     * Height of a departure row with one line of text (tuned on a phone running a 1.3x font:
+     * 26 dp had room to spare, 25 still fits the 15sp time and the platform sign).
+     */
+    const val SINGLE_ROW_DP = 25f
 
     /** Height of a row with a destination plus a "via" line at the default font size. */
     const val DUAL_ROW_DP = 28f
@@ -211,7 +304,7 @@ object WidgetModels {
     fun rowLayout(rows: List<DepartureRow>, availableDp: Float, fontScale: Float = 1f): RowLayout {
         val single = (availableDp / SINGLE_ROW_DP).toInt().coerceIn(1, MAX_ROWS)
         val dual = (availableDp / dualRowDp(fontScale)).toInt().coerceIn(1, MAX_ROWS)
-        val useDual = rows.take(dual).any { it.via.isNotEmpty() } &&
+        val useDual = rows.take(dual).any { it.via.isNotEmpty() || it.notices.isNotEmpty() } &&
             minOf(dual, rows.size) >= minOf(single, rows.size)
         return RowLayout(dual = useDual, maxRows = if (useDual) dual else single)
     }
@@ -219,10 +312,13 @@ object WidgetModels {
     /**
      * Rough width of a destination in the widget's 14sp text at the default font size, scaled by the
      * user's font scale. Measured on a real phone (caps-heavy "Den Haag Centraal" was 155 dp at a
-     * 1.3x font scale, i.e. 7 dp per character at 1.0x).
+     * 1.3x font scale, i.e. 7 dp per character at 1.0x). [bold] text (the fastest-train pill) is
+     * about an eighth wider: "Rotterdam C." in bold ran straight into the text beside it.
      */
-    fun estimateDirectionWidth(direction: String, fontScale: Float = 1f): Float =
-        direction.length * 7.0f * fontScale
+    fun estimateDirectionWidth(direction: String, fontScale: Float = 1f, bold: Boolean = false): Float =
+        direction.length * 7.0f * fontScale * (if (bold) BOLD_WIDTH else 1f)
+
+    private const val BOLD_WIDTH = 1.12f
 
     /**
      * "Rotterdam, Delft" using as many of [cities] (at most [maxCities]) as fit in [budgetDp],

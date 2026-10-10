@@ -28,6 +28,12 @@ data class Departure(
     val trainNumber: String? = null,
     /** UIC codes of the stations the train calls at after this one. */
     val stops: List<String> = emptyList(),
+    /** NS says the train ends early; [direction] is then where it really ends. */
+    val shortened: Boolean = false,
+    /** Where a [shortened] train was meant to go, if NS hadn't already changed [direction]. */
+    val plannedDirection: String? = null,
+    /** Stops NS says the train skips today (station names as NS wrote them). */
+    val skippedStops: List<String> = emptyList(),
 ) {
     val track: String? get() = actualTrack ?: plannedTrack
     val trackChanged: Boolean
@@ -45,6 +51,9 @@ data class Departure(
         if (via.isNotEmpty()) put("v", JSONArray(via))
         trainNumber?.let { put("n", it) }
         if (stops.isNotEmpty()) put("s", JSONArray(stops))
+        if (shortened) put("sh", true)
+        plannedDirection?.let { put("pd", it) }
+        if (skippedStops.isNotEmpty()) put("sk", JSONArray(skippedStops))
     }
 
     companion object {
@@ -59,6 +68,9 @@ data class Departure(
             via = o.optJSONArray("v").strings(),
             trainNumber = if (o.has("n")) o.getString("n") else null,
             stops = o.optJSONArray("s").strings(),
+            shortened = o.optBoolean("sh", false),
+            plannedDirection = if (o.has("pd")) o.getString("pd") else null,
+            skippedStops = o.optJSONArray("sk").strings(),
         )
     }
 }
@@ -93,6 +105,36 @@ data class TripOption(
     }
 }
 
+/**
+ * A disruption or engineering work NS says affects journeys to a favourite station, found in the
+ * journey planner's results. [type] is NS's: "DISRUPTION", "MAINTENANCE" or "CALAMITY".
+ */
+data class RouteDisruption(
+    val favouriteUic: String,
+    val id: String,
+    val type: String,
+    /** NS's one-line summary, e.g. "Door een seinstoring: tussen Delft en Rotterdam rijden er geen treinen." */
+    val head: String,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("f", favouriteUic)
+        .put("i", id)
+        .put("t", type)
+        .put("h", head)
+
+    companion object {
+        fun fromJson(o: JSONObject) = RouteDisruption(
+            favouriteUic = o.getString("f"),
+            id = o.getString("i"),
+            type = o.optString("t"),
+            head = o.optString("h"),
+        )
+    }
+}
+
+/** What the journey planner said about getting to one favourite station. */
+data class TripPlan(val options: List<TripOption>, val disruptions: List<RouteDisruption>)
+
 /** What the widget shows: the last successful (or failed) refresh. */
 data class Snapshot(
     /** Blank when no station could be chosen. */
@@ -117,6 +159,8 @@ data class Snapshot(
     val tripsKey: String = "",
     /** The latest refresh failed because NS couldn't be reached (not because NS said no). */
     val connectionError: Boolean = false,
+    /** Disruptions on the way to the favourites, planned along with [trips]. */
+    val disruptions: List<RouteDisruption> = emptyList(),
 ) {
     fun toJson(): String = JSONObject().apply {
         put("uic", stationUic)
@@ -132,6 +176,7 @@ data class Snapshot(
         put("tat", tripsFetchedAt)
         put("tkey", tripsKey)
         if (connectionError) put("net", true)
+        if (disruptions.isNotEmpty()) put("dis", JSONArray().apply { disruptions.forEach { put(it.toJson()) } })
     }.toString()
 
     companion object {
@@ -140,6 +185,7 @@ data class Snapshot(
             val arr = o.getJSONArray("deps")
             val fetchedAt = o.getLong("at")
             val trips = o.optJSONArray("trips")
+            val disruptions = o.optJSONArray("dis")
             Snapshot(
                 stationUic = o.optString("uic"),
                 stationName = o.optString("name"),
@@ -154,6 +200,9 @@ data class Snapshot(
                 tripsFetchedAt = o.optLong("tat", 0L),
                 tripsKey = o.optString("tkey"),
                 connectionError = o.optBoolean("net", false),
+                disruptions = disruptions
+                    ?.let { d -> (0 until d.length()).map { RouteDisruption.fromJson(d.getJSONObject(it)) } }
+                    .orEmpty(),
             )
         } catch (e: Exception) {
             null
