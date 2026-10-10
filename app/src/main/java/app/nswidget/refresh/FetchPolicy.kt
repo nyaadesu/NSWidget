@@ -22,8 +22,15 @@ object FetchPolicy {
     /** Nothing leaving soon: refresh every [LONG_MS]. */
     const val LONG_MS = 10 * MINUTE
 
-    /** After a failed call, don't retry more often than this. */
+    /** After NS returned an error, don't retry more often than this. */
     const val FAILURE_MS = 5 * MINUTE
+
+    /**
+     * After NS couldn't be reached at all, try again on the next tick. That typically happens just
+     * after the screen comes on or while the phone moves from Wi-Fi to mobile data - exactly when
+     * someone is heading for a train - and a request that never reached NS costs nothing.
+     */
+    const val CONNECTION_RETRY_MS = 1 * MINUTE
 
     /** Past this many calls in a day, slow right down - a safety net well below the 5,000 limit. */
     const val SOFT_DAILY_LIMIT = 2_000
@@ -36,7 +43,13 @@ object FetchPolicy {
     fun tripsIntervalMs(callsToday: Int): Long =
         if (callsToday >= SOFT_DAILY_LIMIT) TRIPS_OVER_BUDGET_MS else TRIPS_MS
 
-    fun intervalMs(departures: List<Departure>, nowMs: Long, callsToday: Int, failing: Boolean): Long {
+    fun intervalMs(
+        departures: List<Departure>,
+        nowMs: Long,
+        callsToday: Int,
+        failing: Boolean,
+        connectionError: Boolean = false,
+    ): Long {
         val nextDeparture = departures
             .filter { !it.cancelled && it.actualAt >= nowMs }
             .minOfOrNull { it.actualAt }
@@ -47,7 +60,7 @@ object FetchPolicy {
             nextDeparture - nowMs <= SOON_MS -> MEDIUM_MS
             else -> LONG_MS
         }
-        if (failing) interval = maxOf(interval, FAILURE_MS)
+        if (failing) interval = if (connectionError) CONNECTION_RETRY_MS else maxOf(interval, FAILURE_MS)
         if (callsToday >= SOFT_DAILY_LIMIT) interval = maxOf(interval, OVER_BUDGET_MS)
         return interval
     }

@@ -3,12 +3,14 @@ package app.nswidget.refresh
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
+import android.os.Build
 import androidx.glance.appwidget.updateAll
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
@@ -20,12 +22,14 @@ import app.nswidget.data.Snapshot
 import app.nswidget.data.SnapshotStore
 import app.nswidget.data.StationRepository
 import app.nswidget.data.friendlyMessage
+import app.nswidget.data.isConnectionError
 import app.nswidget.data.nearestStation
 import app.nswidget.location.LocationHelper
 import app.nswidget.widget.NsWidget
 import app.nswidget.widget.NsWidgetReceiver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
@@ -62,10 +66,14 @@ object Refresher {
         enqueueFetch(ctx, replace = true, freshLocation = freshLocation)
 
     fun enqueueFetch(ctx: Context, replace: Boolean, freshLocation: Boolean = false) {
-        val request = OneTimeWorkRequestBuilder<RefreshWorker>()
+        val builder = OneTimeWorkRequestBuilder<RefreshWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .setInputData(workDataOf(KEY_FRESH_LOCATION to freshLocation))
-            .build()
+        // Expedited: run right away even when Android has put the (rarely opened) app in a low
+        // standby bucket, which otherwise delays the job and can cut it off from the network just
+        // after the screen comes on. Before Android 12 this would need a foreground notification.
+        if (Build.VERSION.SDK_INT >= 31) builder.setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+        val request = builder.build()
         WorkManager.getInstance(ctx).enqueueUniqueWork(
             "fetch",
             if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP,
@@ -84,6 +92,7 @@ object Refresher {
                 nowMs = nowMs,
                 callsToday = ApiUsage(ctx).callsToday(),
                 failing = snapshot.error != null,
+                connectionError = snapshot.connectionError,
             )
             if (due && Settings(ctx).apiKey.isNotBlank()) enqueueFetch(ctx, replace = false)
         } finally {
@@ -139,8 +148,10 @@ object Refresher {
             return Snapshot("", "", null, now(), emptyList(), "Allow location or pick a station in the app")
         }
         val fresh = try {
-            ApiUsage(ctx).record()
-            val departures = withContext(Dispatchers.IO) { NsApi.fetchDepartures(settings.apiKey, target.uic, target.name) }
+            val departures = retryingConnection {
+                ApiUsage(ctx).record()
+                withContext(Dispatchers.IO) { NsApi.fetchDepartures(settings.apiKey, target.uic, target.name) }
+            }
             Snapshot(target.uic, target.name, target.distance, now(), departures, null, target.lat, target.lng)
         } catch (e: Exception) {
             currentCoroutineContext().ensureActive()
@@ -178,6 +189,26 @@ object Refresher {
         }
     }
 
+    /**
+     * Runs [block], trying again a couple of times if NS can't be reached. Right after the screen
+     * comes on, or while the phone hands over from Wi-Fi to mobile data, the network often
+     * reports "connected" a few seconds before requests actually get through.
+     */
+    private suspend fun <T> retryingConnection(block: suspend () -> T): T {
+        for (pause in CONNECTION_RETRY_PAUSES_MS) {
+            try {
+                return block()
+            } catch (e: Exception) {
+                if (!e.isConnectionError()) throw e
+                currentCoroutineContext().ensureActive()
+            }
+            delay(pause)
+        }
+        return block()
+    }
+
+    private val CONNECTION_RETRY_PAUSES_MS = listOf(2_000L, 5_000L)
+
     /** Keep showing the last good departures (if they're for the same station), but flag the failure. */
     private fun failed(previous: Snapshot?, target: Target?, e: Exception): Snapshot {
         val keep = previous?.takeIf { target == null || it.stationUic == target.uic }
@@ -194,6 +225,7 @@ object Refresher {
             trips = keep?.trips.orEmpty(),
             tripsFetchedAt = keep?.tripsFetchedAt ?: 0L,
             tripsKey = keep?.tripsKey.orEmpty(),
+            connectionError = e.isConnectionError(),
         )
     }
 

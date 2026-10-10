@@ -22,8 +22,28 @@ class FetchPolicyTest {
         cancelled = cancelled,
     )
 
-    private fun interval(departures: List<Departure>, callsToday: Int = 0, failing: Boolean = false) =
-        FetchPolicy.intervalMs(departures, now, callsToday, failing) / 60_000L
+    private fun interval(
+        departures: List<Departure>,
+        callsToday: Int = 0,
+        failing: Boolean = false,
+        connectionError: Boolean = false,
+    ) = FetchPolicy.intervalMs(departures, now, callsToday, failing, connectionError) / 60_000L
+
+    @Test
+    fun retriesOnTheNextTickWhenNsCouldNotBeReached() {
+        // Phone just woke up / switched networks: don't leave the list empty for 5 minutes.
+        assertEquals(1L, interval(emptyList(), failing = true, connectionError = true))
+        assertEquals(1L, interval(listOf(dep(60)), failing = true, connectionError = true))
+        // NS itself said no (bad key, rate limit): keep backing off.
+        assertEquals(5L, interval(listOf(dep(4)), failing = true))
+    }
+
+    @Test
+    fun connectionErrorSurvivesSaving() {
+        val s = Snapshot("8400621", "Utrecht Centraal", null, now, emptyList(), "No connection to NS", connectionError = true)
+        assertEquals(true, Snapshot.fromJson(s.toJson())!!.connectionError)
+        assertEquals(false, Snapshot.fromJson(s.copy(connectionError = false).toJson())!!.connectionError)
+    }
 
     @Test
     fun everyTwoMinutesWhileATrainIsAboutToLeave() {
