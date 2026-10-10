@@ -171,6 +171,9 @@ object NsApi {
         if (isNull(name)) null else optString(name).takeIf { it.isNotBlank() }
 }
 
+/** NS couldn't be reached at all (no network, network switching, timeout), as opposed to NS refusing. */
+fun Exception.isConnectionError(): Boolean = this is IOException && this !is NsApiException
+
 fun Exception.friendlyMessage(): String = when (this) {
     is NsApiException -> message ?: "NS API error"
     is IOException -> "No connection to NS"

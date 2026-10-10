@@ -115,6 +115,8 @@ data class Snapshot(
     val tripsFetchedAt: Long = 0L,
     /** Which station and favourites [trips] were planned for; see [Favourites.key]. */
     val tripsKey: String = "",
+    /** The latest refresh failed because NS couldn't be reached (not because NS said no). */
+    val connectionError: Boolean = false,
 ) {
     fun toJson(): String = JSONObject().apply {
         put("uic", stationUic)
@@ -129,6 +131,7 @@ data class Snapshot(
         if (trips.isNotEmpty()) put("trips", JSONArray().apply { trips.forEach { put(it.toJson()) } })
         put("tat", tripsFetchedAt)
         put("tkey", tripsKey)
+        if (connectionError) put("net", true)
     }.toString()
 
     companion object {
@@ -150,6 +153,7 @@ data class Snapshot(
                 trips = trips?.let { t -> (0 until t.length()).map { TripOption.fromJson(t.getJSONObject(it)) } }.orEmpty(),
                 tripsFetchedAt = o.optLong("tat", 0L),
                 tripsKey = o.optString("tkey"),
+                connectionError = o.optBoolean("net", false),
             )
         } catch (e: Exception) {
             null
