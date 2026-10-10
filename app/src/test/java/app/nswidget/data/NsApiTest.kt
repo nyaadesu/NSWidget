@@ -91,6 +91,84 @@ class NsApiTest {
         assertEquals("no realtime estimate means no delay", 0, spr.delayMinutes)
     }
 
+    // During a Rotterdam - Delft disruption, seen from Dordrecht (messages as NS sent them on 2026-10-10).
+    private val disruptedJson = """
+        {"payload":{"departures":[
+          {"direction":"Den Haag Centraal","plannedDateTime":"2026-10-10T13:00:00+0200",
+           "product":{"number":"2250","categoryCode":"IC"},"cancelled":false,
+           "messages":[{"message":"Rijdt niet verder dan Rotterdam C. door een sein- en wisselstoring","style":"WARNING"}],
+           "routeStations":[{"uicCode":"8400530","mediumName":"Rotterdam C."},{"uicCode":"8400171","mediumName":"Delft Campus"},{"uicCode":"8400280","mediumName":"Den Haag C."}]},
+          {"direction":"Den Haag Centraal","plannedDateTime":"2026-10-10T13:05:00+0200",
+           "product":{"number":"5050","categoryCode":"SPR"},"cancelled":false,
+           "messages":[{"message":"Rijdt niet","style":"WARNING"}]},
+          {"direction":"Amsterdam Centraal","plannedDateTime":"2026-10-10T13:10:00+0200",
+           "product":{"number":"2150","categoryCode":"IC"},"cancelled":false,
+           "messages":[{"message":"Stopt niet in Delft Campus","style":"INFO"}],
+           "routeStations":[{"uicCode":"8400530","mediumName":"Rotterdam C."},{"uicCode":"8400171","mediumName":"Delft Campus"},{"uicCode":"8400058","mediumName":"Amsterdam C."}]}
+        ]}}
+    """.trimIndent()
+
+    @Test
+    fun shortenedTrainEndsWhereNsSaysAndLosesTheStopsBeyond() {
+        val ic = NsApi.parseDepartures(disruptedJson, originName = "Dordrecht")[0]
+        assertTrue(ic.shortened)
+        assertFalse(ic.cancelled)
+        assertEquals("Rotterdam C.", ic.direction)
+        assertEquals("Den Haag Centraal", ic.plannedDirection)
+        assertEquals(listOf("8400530"), ic.stops)
+        assertEquals("Rotterdam is now the destination, not a via city", emptyList<String>(), ic.via)
+    }
+
+    @Test
+    fun cancellationNoteCancelsTheTrain() {
+        assertTrue(NsApi.parseDepartures(disruptedJson)[1].cancelled)
+    }
+
+    @Test
+    fun skippedStopsAreDroppedFromTheRoute() {
+        val ic = NsApi.parseDepartures(disruptedJson)[2]
+        assertEquals(listOf("Delft Campus"), ic.skippedStops)
+        assertEquals(listOf("8400530", "8400058"), ic.stops)
+        assertFalse(ic.shortened)
+    }
+
+    @Test
+    fun disruptionDetailsSurviveStorage() {
+        NsApi.parseDepartures(disruptedJson).forEach {
+            assertEquals(it, Departure.fromJson(it.toJson()))
+        }
+    }
+
+    // Journeys Dordrecht -> Delft on 2026-10-10, cut down to the parts that matter.
+    private val disruptedTripsJson = """
+        {"trips":[
+          {"status":"CANCELLED",
+           "primaryMessage":{"title":"Dit reisadvies vervalt","type":"TRIP_CANCELLED",
+             "message":{"id":"6068184","externalId":"prio-6068184","type":"DISRUPTION","phase":"PHASE_3",
+               "head":"Door een sein- en wisselstoring: tussen Delft Campus en Rotterdam Centraal rijden er geen treinen.",
+               "text":"Door een sein- en wisselstoring: tussen Delft Campus en Rotterdam Centraal rijden er geen treinen."}},
+           "legs":[{"name":"IC 3551","cancelled":true,"product":{"number":"3551"},
+             "messages":[{"id":"6068184","type":"DISRUPTION","head":"Door een sein- en wisselstoring: tussen Delft Campus en Rotterdam Centraal rijden er geen treinen."}]}]},
+          {"status":"NORMAL",
+           "primaryMessage":{"title":"Kortere trein, extra druk","type":"SHORTENED_TRAIN"},
+           "legs":[{"name":"IC 2345","product":{"number":"2345"},
+             "messages":[{"type":"SHORTENED","text":"Kortere trein, extra druk"}]},
+                   {"name":"IC 642","product":{"number":"642"},
+             "messages":[{"id":"7006841","type":"MAINTENANCE","text":"Door werkzaamheden rijden er bussen."}]}]}
+        ]}
+    """.trimIndent()
+
+    @Test
+    fun findsEachDisruptionOnTheWayToAFavouriteOnce() {
+        val found = NsApi.parseTripDisruptions(disruptedTripsJson, "8400170")
+        assertEquals(listOf("6068184", "7006841"), found.map { it.id })
+        assertEquals(listOf("DISRUPTION", "MAINTENANCE"), found.map { it.type })
+        assertTrue(found.all { it.favouriteUic == "8400170" })
+        assertTrue(found[0].head.contains("geen treinen"))
+        assertEquals("falls back to the text when there's no head", "Door werkzaamheden rijden er bussen.", found[1].head)
+        assertTrue(NsApi.parseTripDisruptions("""{"trips":[{"status":"NORMAL","legs":[]}]}""", "x").isEmpty())
+    }
+
     @Test
     fun emptyOrUnexpectedPayloadGivesNoDepartures() {
         assertTrue(NsApi.parseDepartures("""{"payload":{"departures":[]}}""").isEmpty())

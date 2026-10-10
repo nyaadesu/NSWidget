@@ -4,7 +4,6 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.os.Build
-import androidx.glance.appwidget.updateAll
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
@@ -45,7 +44,7 @@ object Refresher {
     /** A saved location fix older than this is renewed on the next fetch (background location only). */
     const val LOCATION_STALE_MS = 10 * 60_000L
 
-    internal const val KEY_FRESH_LOCATION = "fresh_location"
+    internal const val KEY_MANUAL = "manual"
 
     fun hasWidgets(ctx: Context): Boolean =
         AppWidgetManager.getInstance(ctx)
@@ -60,15 +59,16 @@ object Refresher {
 
     /**
      * Called when the user changed something that affects what the widget shows, or pressed
-     * refresh. [freshLocation] asks for a new location fix first instead of Android's last known one.
+     * refresh. [manual] (the refresh button) renews everything: a new location fix instead of
+     * Android's last known one, and new journeys to the favourites even if the saved ones are recent.
      */
-    fun requestFetch(ctx: Context, freshLocation: Boolean = false) =
-        enqueueFetch(ctx, replace = true, freshLocation = freshLocation)
+    fun requestFetch(ctx: Context, manual: Boolean = false) =
+        enqueueFetch(ctx, replace = true, manual = manual)
 
-    fun enqueueFetch(ctx: Context, replace: Boolean, freshLocation: Boolean = false) {
+    fun enqueueFetch(ctx: Context, replace: Boolean, manual: Boolean = false) {
         val builder = OneTimeWorkRequestBuilder<RefreshWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-            .setInputData(workDataOf(KEY_FRESH_LOCATION to freshLocation))
+            .setInputData(workDataOf(KEY_MANUAL to manual))
         // Expedited: run right away even when Android has put the (rarely opened) app in a low
         // standby bucket, which otherwise delays the job and can cut it off from the network just
         // after the screen comes on. Before Android 12 this would need a foreground notification.
@@ -84,7 +84,7 @@ object Refresher {
     /** Alarm tick: repaint (cheap, no network), fetch if due, schedule the next tick. */
     suspend fun tick(ctx: Context) {
         try {
-            NsWidget().updateAll(ctx)
+            NsWidget.repaintAll(ctx)
             val snapshot = SnapshotStore(ctx).load()
             val nowMs = System.currentTimeMillis()
             val due = snapshot == null || nowMs - snapshot.attemptedAt >= FetchPolicy.intervalMs(
@@ -101,15 +101,15 @@ object Refresher {
     }
 
     /** Picks the station, downloads its departures, stores them and repaints the widget. */
-    suspend fun fetch(ctx: Context, freshLocation: Boolean = false) {
+    suspend fun fetch(ctx: Context, manual: Boolean = false) {
         val settings = Settings(ctx)
         if (settings.apiKey.isNotBlank()) {
             val store = SnapshotStore(ctx)
-            val snapshot = buildSnapshot(ctx, settings, store.load(), wantsFreshFix(ctx, settings, freshLocation))
+            val snapshot = buildSnapshot(ctx, settings, store.load(), wantsFreshFix(ctx, settings, manual), manual)
             currentCoroutineContext().ensureActive() // a cancelled fetch must not overwrite newer data
             store.save(snapshot)
         }
-        NsWidget().updateAll(ctx)
+        NsWidget.repaintAll(ctx)
     }
 
     private data class Target(
@@ -136,6 +136,7 @@ object Refresher {
         settings: Settings,
         previous: Snapshot?,
         freshLocation: Boolean,
+        manual: Boolean,
     ): Snapshot {
         val target: Target? = try {
             LocationHelper.refreshSaved(ctx, preferFresh = freshLocation)
@@ -157,35 +158,56 @@ object Refresher {
             currentCoroutineContext().ensureActive()
             return failed(previous, target, e)
         }
-        return withTrips(ctx, settings, fresh, previous)
+        return withTrips(ctx, settings, fresh, previous, force = manual)
     }
 
     /**
      * Adds journey-planner results towards the favourite stations (one call per favourite), which
      * tell the widget which trains reach them and which is the fastest way there. They are
-     * re-planned at most every few minutes; otherwise, or if planning fails, the previous results
-     * for the same station and favourites are kept.
+     * re-planned at most every few minutes unless [force]d by the refresh button; otherwise, or if
+     * planning fails, the previous results for the same station and favourites are kept.
      */
-    private suspend fun withTrips(ctx: Context, settings: Settings, fresh: Snapshot, previous: Snapshot?): Snapshot {
+    private suspend fun withTrips(
+        ctx: Context,
+        settings: Settings,
+        fresh: Snapshot,
+        previous: Snapshot?,
+        force: Boolean,
+    ): Snapshot {
         val favourites = settings.favourites.filter { it.uic != fresh.stationUic }
         if (favourites.isEmpty()) return fresh
         val key = Favourites.key(fresh.stationUic, favourites)
         val earlier = previous?.takeIf { it.tripsKey == key }
         val usage = ApiUsage(ctx)
-        val due = earlier == null || now() - earlier.tripsFetchedAt >= FetchPolicy.tripsIntervalMs(usage.callsToday())
+        val due = force || earlier == null || now() - earlier.tripsFetchedAt >= FetchPolicy.tripsIntervalMs(usage.callsToday())
         if (!due) {
-            return fresh.copy(trips = earlier!!.trips, tripsFetchedAt = earlier.tripsFetchedAt, tripsKey = key)
+            return fresh.copy(
+                trips = earlier!!.trips,
+                tripsFetchedAt = earlier.tripsFetchedAt,
+                tripsKey = key,
+                disruptions = earlier.disruptions,
+            )
         }
         return try {
-            val trips = favourites.flatMap { favourite ->
+            val plans = favourites.map { favourite ->
                 usage.record()
                 withContext(Dispatchers.IO) { NsApi.fetchTrips(settings.apiKey, fresh.stationUic, favourite.uic) }
             }
-            fresh.copy(trips = trips, tripsFetchedAt = now(), tripsKey = key)
+            fresh.copy(
+                trips = plans.flatMap { it.options },
+                tripsFetchedAt = now(),
+                tripsKey = key,
+                disruptions = plans.flatMap { it.disruptions },
+            )
         } catch (e: Exception) {
             currentCoroutineContext().ensureActive()
             // Keep what we had, and wait a full interval before trying again.
-            fresh.copy(trips = earlier?.trips.orEmpty(), tripsFetchedAt = now(), tripsKey = key)
+            fresh.copy(
+                trips = earlier?.trips.orEmpty(),
+                tripsFetchedAt = now(),
+                tripsKey = key,
+                disruptions = earlier?.disruptions.orEmpty(),
+            )
         }
     }
 
@@ -226,6 +248,7 @@ object Refresher {
             tripsFetchedAt = keep?.tripsFetchedAt ?: 0L,
             tripsKey = keep?.tripsKey.orEmpty(),
             connectionError = e.isConnectionError(),
+            disruptions = keep?.disruptions.orEmpty(),
         )
     }
 
@@ -247,8 +270,7 @@ object Refresher {
 
 class RefreshWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
-        val freshLocation = inputData.getBoolean(Refresher.KEY_FRESH_LOCATION, false)
-        Refresher.fetch(applicationContext, freshLocation)
+        Refresher.fetch(applicationContext, manual = inputData.getBoolean(Refresher.KEY_MANUAL, false))
         return Result.success()
     }
 }

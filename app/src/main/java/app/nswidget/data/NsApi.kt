@@ -28,12 +28,13 @@ object NsApi {
         return parseDepartures(get(url, apiKey), originName)
     }
 
-    /** Journey-planner options from one station to another, starting now. */
-    fun fetchTrips(apiKey: String, fromUic: String, toUic: String): List<TripOption> {
+    /** Journey-planner options from one station to another, starting now, and what disrupts them. */
+    fun fetchTrips(apiKey: String, fromUic: String, toUic: String): TripPlan {
         val from = URLEncoder.encode(fromUic, "UTF-8")
         val to = URLEncoder.encode(toUic, "UTF-8")
         val url = "$BASE/reisinformatie-api/api/v3/trips?originUicCode=$from&destinationUicCode=$to"
-        return parseTrips(get(url, apiKey), toUic)
+        val json = get(url, apiKey)
+        return TripPlan(parseTrips(json, toUic), parseTripDisruptions(json, toUic))
     }
 
     private fun get(url: String, apiKey: String): String {
@@ -76,10 +77,29 @@ object NsApi {
                 ?: o.str("trainCategory")
                 ?: product?.str("shortCategoryName")
                 ?: ""
-            val direction = o.str("direction") ?: ""
-            val route = o.optJSONArray("routeStations")?.let { arr ->
+            val notes = o.optJSONArray("messages")?.let { arr ->
+                (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.str("message") }
+            }.orEmpty()
+            val cancelled = o.optBoolean("cancelled", false) || notes.any { Disruptions.isCancelled(it) }
+            var direction = o.str("direction") ?: ""
+            var route = o.optJSONArray("routeStations")?.let { arr ->
                 (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
             }.orEmpty()
+            // A shortened train: show where it really ends, and forget the stops it no longer reaches.
+            val endsAt = if (cancelled) null else notes.firstNotNullOfOrNull { Disruptions.endsAt(it) }
+            var plannedDirection: String? = null
+            if (endsAt != null) {
+                val cut = route.indexOfFirst { Disruptions.sameStation(it.str("mediumName"), endsAt) }
+                if (cut >= 0) route = route.take(cut + 1)
+                if (!Disruptions.sameStation(direction, endsAt)) {
+                    plannedDirection = direction.takeIf { it.isNotBlank() }
+                    direction = endsAt
+                }
+            }
+            val skipped = notes.flatMap { Disruptions.skippedStops(it) }
+            if (skipped.isNotEmpty()) {
+                route = route.filterNot { r -> skipped.any { Disruptions.sameStation(r.str("mediumName"), it) } }
+            }
             val stopNames = route.mapNotNull { it.str("mediumName") }
             result += Departure(
                 plannedAt = planned,
@@ -88,10 +108,13 @@ object NsApi {
                 category = category.take(4),
                 plannedTrack = o.str("plannedTrack"),
                 actualTrack = o.str("actualTrack"),
-                cancelled = o.optBoolean("cancelled", false),
+                cancelled = cancelled,
                 via = MajorCities.via(stopNames, originName, direction),
                 trainNumber = product?.str("number"),
                 stops = route.mapNotNull { it.str("uicCode") },
+                shortened = endsAt != null,
+                plannedDirection = plannedDirection,
+                skippedStops = skipped,
             )
         }
         return result
@@ -144,6 +167,38 @@ object NsApi {
             result += TripOption(favouriteUic, trainNumber, departAt, arriveAt, transfers = rides.size - 1)
         }
         return result
+    }
+
+    private val DISRUPTION_TYPES = setOf("CALAMITY", "DISRUPTION", "MAINTENANCE")
+
+    /**
+     * The disruptions and engineering works NS attaches to the planned journeys (each journey's
+     * main message and its rides' messages), once each. Other notes, like "shorter train, extra
+     * busy", are left out.
+     */
+    fun parseTripDisruptions(json: String, favouriteUic: String): List<RouteDisruption> {
+        val root = JSONObject(json)
+        val trips = root.optJSONArray("trips")
+            ?: root.optJSONObject("payload")?.optJSONArray("trips")
+            ?: return emptyList()
+        val found = LinkedHashMap<String, RouteDisruption>()
+        fun add(message: JSONObject?) {
+            val id = message?.str("id") ?: return
+            val type = message.str("type") ?: return
+            if (type !in DISRUPTION_TYPES || id in found) return
+            val head = message.str("head") ?: message.str("text") ?: return
+            found[id] = RouteDisruption(favouriteUic, id, type, head)
+        }
+        for (i in 0 until trips.length()) {
+            val trip = trips.optJSONObject(i) ?: continue
+            add(trip.optJSONObject("primaryMessage")?.optJSONObject("message"))
+            val legs = trip.optJSONArray("legs") ?: continue
+            for (l in 0 until legs.length()) {
+                val messages = legs.optJSONObject(l)?.optJSONArray("messages") ?: continue
+                for (m in 0 until messages.length()) add(messages.optJSONObject(m))
+            }
+        }
+        return found.values.toList()
     }
 
     /** Real-time if known, otherwise the timetable. */

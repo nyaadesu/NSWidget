@@ -1,6 +1,8 @@
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -16,14 +18,31 @@ android {
         applicationId = "app.nswidget"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
+        versionCode = 3
         // Includes the build time so it's obvious which APK is installed (shown in the app).
-        versionName = "1.1 (" + SimpleDateFormat("MMM d, HH:mm", Locale.ENGLISH).format(Date()) + ")"
+        versionName = "1.2 (" + SimpleDateFormat("MMM d, HH:mm", Locale.ENGLISH).format(Date()) + ")"
+    }
+
+    // Release builds are signed with a private key that never enters the repo: the Gradle property
+    // `nswidget.signing` (e.g. in ~/.gradle/gradle.properties) points to a properties file with
+    // storeFile, storePassword, keyAlias and keyPassword. Without it, release builds are unsigned.
+    val signing = (findProperty("nswidget.signing") as String?)?.let(::File)?.takeIf { it.isFile }
+        ?.let { file -> Properties().apply { file.inputStream().use(::load) } }
+    signingConfigs {
+        if (signing != null) {
+            create("release") {
+                storeFile = File(signing.getProperty("storeFile"))
+                storePassword = signing.getProperty("storePassword")
+                keyAlias = signing.getProperty("keyAlias")
+                keyPassword = signing.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (signing != null) signingConfig = signingConfigs.getByName("release")
         }
     }
 

@@ -16,7 +16,12 @@ An Android home-screen widget for the Dutch railways (NS) that shows
    and the train that starts the fastest journey there (earliest arrival from NS's journey planner,
    possibly with a change) gets a filled, fully rounded highlight and a bold destination. Each favourite costs one journey-planner call at most every
    5 minutes while the screen is on.
-4. **Material You styling** (Material 3 Expressive, as used by recent Android versions): the widget and app
+4. **Disruptions.** A train that ends early shows where it now ends, in red, with "not to Den Haag Centraal"
+   beside it; skipped stops show as "skips Delft Campus", and cancelled trains are struck through with a red
+   platform sign. When NS's journey planner reports a disruption or engineering works on the way to a
+   favourite, a red square with a warning triangle (holding that favourite's emoji) appears beside the
+   discount banner; tap it for NS's explanation on ns.nl.
+5. **Material You styling** (Material 3 Expressive, as used by recent Android versions): the widget and app
    follow your wallpaper's dynamic colours, use large rounded shapes and tonal containers, and the app icon
    supports themed icons. The discount banner stays green / amber / red and platform signs stay NS yellow so
    they read at a glance on any wallpaper. Buttons and the status badge are scalloped "cookie" shapes, like the
@@ -37,7 +42,8 @@ The rules live in [`PeakRules.kt`](app/src/main/java/app/nswidget/discount/PeakR
 
 ## Setup
 
-1. Open the folder in **Android Studio** (Koala or newer) and let Gradle sync, then run it on a phone (Android 8+).
+1. Download the APK from [Releases](https://github.com/nyaadesu/NSWidget/releases) and install it (Android 8+),
+   or open the folder in **Android Studio** (Koala or newer), let Gradle sync and run it on a phone.
 2. Get a free NS API key: create an account at <https://apiportal.ns.nl>, subscribe to the **Ns-App** product, copy the key.
 3. Open the *NS Widget* app, paste the key, and allow location.
    - For the widget to follow you while the app is closed, also tap **Allow in background** and choose
@@ -59,7 +65,8 @@ The discount banner works without an API key or location.
   within 15 min, every 5 min if the next one is 15-45 min away, otherwise every 10 min. Failed calls
   back off to 5 min, and past 2,000 calls in a day it slows to every 15 min. With the screen on for
   a few hours that's ~100-150 calls a day (the free tier allows 5,000); the app shows today's count.
-- The refresh button also gets a fresh location fix, so the nearest station follows you. Outside the
+- The refresh button renews everything at once: departures, the journeys to your favourites, and a
+  fresh location fix, so the nearest station follows you. Outside the
   app that needs "Allow all the time" location; otherwise Android's last known location is used.
   With background access, a location fix older than 10 minutes is also renewed automatically.
 
@@ -75,7 +82,9 @@ app/src/main/java/app/nswidget/
   ui/         settings screen (Compose)
 ```
 
-Run the unit tests with `./gradlew test`.
+Run the unit tests with `./gradlew test`. Release builds are signed only when the Gradle property
+`nswidget.signing` points to a properties file with `storeFile`, `storePassword`, `keyAlias` and
+`keyPassword` (kept outside the repo); otherwise `assembleRelease` produces an unsigned APK.
 
 ## Notes
 
